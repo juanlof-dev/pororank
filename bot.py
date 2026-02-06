@@ -280,22 +280,32 @@ async def on_ready():
 # ------------------ RUN ------------------
 
 if __name__ == "__main__":
-import nest_asyncio
-nest_asyncio.apply()
-import asyncio
-from aiohttp import web
+    import nest_asyncio
+    nest_asyncio.apply()
+    import asyncio
+    from aiohttp import web
 
-async def start_bot_and_web():
-    # Inicia el bot en background
-    bot_task = asyncio.create_task(bot.start(TOKEN))
+    async def start_bot_and_web():
+        try:
+            # Inicia el bot en background
+            bot_task = asyncio.create_task(bot.start(TOKEN))
 
-    # Inicia el servidor web (health endpoint)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
-    await site.start()
+            # Inicia el servidor web (health endpoint)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+            await site.start()
 
-    print("✅ Bot y health endpoint corriendo")
-    await bot_task  # esto mantiene el bot vivo
+            print("✅ Bot y health endpoint corriendo")
 
+            # Mantiene el bot vivo
+            await bot_task
+
+        except Exception as e:
+            print("❌ Error al iniciar bot:", e)
+            raise  # Permite que Railway vea que hubo error
+
+    # Ejecuta todo en un solo loop
+    asyncio.run(start_bot_and_web())
 asyncio.run(start_bot_and_web())
+
