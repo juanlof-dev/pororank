@@ -16,7 +16,6 @@ RIOT_API_KEY = os.getenv("RIOT_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ------------------ CONSTANTS ------------------
-# EJEMPLO (ajusta a tu servidor)
 REGIONS = {
     "EUW": ("euw1", "europe", 1409214841973112922),
     "LAN": ("la1", "americas", 1409214864064249990),
@@ -67,12 +66,6 @@ async def init_db():
         DATABASE_URL,
         min_size=1,
         max_size=5
-    )
-
-async def get_accounts(user_id):
-    return await bot.db.fetch(
-        "SELECT * FROM accounts WHERE user_id=$1 ORDER BY is_primary DESC",
-        str(user_id)
     )
 
 # ------------------ RIOT API ------------------
@@ -160,7 +153,6 @@ class RegionDropdown(Select):
     async def callback(self, interaction):
         region = self.values[0]
         acc = await validate_riot_id(self.name, self.tag, region)
-
         if not acc:
             await interaction.response.send_message(
                 "❌ Riot ID inválido.",
@@ -260,26 +252,23 @@ app.router.add_get("/", health)
 
 @bot.event
 async def on_ready():
-    await bot.wait_until_ready()  # garantiza que el bot esté conectado
+    await bot.wait_until_ready()
 
     bot.http = aiohttp.ClientSession()
     bot.db = await init_db()
     auto_refresh.start()
 
     try:
-        # Espera a que al menos un guild esté cacheado
         while not bot.guilds:
             await asyncio.sleep(1)
 
-        # Obtener canal seguro
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
 
-        # Evitar duplicados: borrar antiguos mensajes del bot (solo embed)
+        # Evitar duplicados: solo embed inicial
         async for msg in channel.history(limit=10):
             if msg.author == bot.user and msg.embeds:
                 await msg.delete()
 
-        # Enviar embed inicial SIN View
         await channel.send(
             embed=discord.Embed(
                 title="🎮 Vinculación LoL",
@@ -299,14 +288,15 @@ async def on_ready():
         traceback.print_exc()
 
     print("Bot listo (Railway)")
-    
+
 # ------------------ RUN ------------------
 
 if __name__ == "__main__":
     import nest_asyncio
     nest_asyncio.apply()
     import asyncio
-    from aiohttp import web
+
+    loop = asyncio.get_event_loop()
 
     async def start_web():
         runner = web.AppRunner(app)
@@ -315,15 +305,6 @@ if __name__ == "__main__":
         await site.start()
         print("✅ Health endpoint corriendo")
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(start_web())      # corre health endpoint en background
-    loop.create_task(bot.start(TOKEN)) # corre bot en el mismo loop
-    loop.run_forever()                 # mantiene todo vivo
-
-
-
-
-
-
-
-
+    loop.create_task(start_web())
+    loop.create_task(bot.start(TOKEN))
+    loop.run_forever()
