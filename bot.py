@@ -280,6 +280,22 @@ async def on_ready():
 # ------------------ RUN ------------------
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(bot.start(TOKEN))
-    web.run_app(app, port=int(os.getenv("PORT", 8080)))
+import nest_asyncio
+nest_asyncio.apply()
+import asyncio
+from aiohttp import web
+
+async def start_bot_and_web():
+    # Inicia el bot en background
+    bot_task = asyncio.create_task(bot.start(TOKEN))
+
+    # Inicia el servidor web (health endpoint)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+    await site.start()
+
+    print("✅ Bot y health endpoint corriendo")
+    await bot_task  # esto mantiene el bot vivo
+
+asyncio.run(start_bot_and_web())
