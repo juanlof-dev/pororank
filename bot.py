@@ -252,22 +252,26 @@ app.router.add_get("/", health)
 
 @bot.event
 async def on_ready():
-    await bot.wait_until_ready()
+    if getattr(bot, "panel_publicado", False):
+        return  # evita duplicados si el bot se reconecta
+
     bot.http = aiohttp.ClientSession()
     bot.db = await init_db()
     auto_refresh.start()
 
-    try:
-        while not bot.guilds:
-            await asyncio.sleep(1)
+    # Espera a que el bot tenga guilds cargadas
+    while not bot.guilds:
+        await asyncio.sleep(1)
 
+    try:
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
 
-        # Borrar antiguos embeds
+        # Limpiar paneles antiguos
         async for msg in channel.history(limit=10):
             if msg.author == bot.user and msg.embeds:
                 await msg.delete()
 
+        # Publicar embed
         await channel.send(
             embed=discord.Embed(
                 title="🎮 Vinculación LoL",
@@ -276,7 +280,9 @@ async def on_ready():
             ),
             view=Panel()
         )
+
         print(f"✅ Embed inicial publicado en {channel.name} ({channel.guild.name})")
+        bot.panel_publicado = True
 
     except Exception as e:
         import traceback
@@ -289,14 +295,14 @@ async def on_ready():
 
 if __name__ == "__main__":
     async def main():
-        # Health endpoint
+        # Health endpoint Railway
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
         await site.start()
         print("✅ Health endpoint corriendo")
 
-        # Bot principal bloqueante
+        # Bloquea aquí y conecta Discord
         await bot.start(TOKEN)
 
     asyncio.run(main())
