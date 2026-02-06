@@ -260,20 +260,27 @@ app.router.add_get("/", health)
 
 @bot.event
 async def on_ready():
+    await bot.wait_until_ready()  # asegura que guilds y canales están cargados
+
     bot.http = aiohttp.ClientSession()
     bot.db = await init_db()
     auto_refresh.start()
 
-    channel = bot.get_channel(PANEL_CHANNEL_ID)
-    if channel:
-        await channel.send(
-            embed=discord.Embed(
-                title="🎮 Vinculación LoL",
-                description="Gestiona tus cuentas",
-                color=0x9146FF
-            ),
-            view=Panel()
-        )
+    try:
+        channel = bot.get_channel(PANEL_CHANNEL_ID)
+        if channel:
+            await channel.send(
+                embed=discord.Embed(
+                    title="🎮 Vinculación LoL",
+                    description="Gestiona tus cuentas",
+                    color=0x9146FF
+                ),
+                view=Panel()
+            )
+        else:
+            print(f"❌ No se encontró el canal {PANEL_CHANNEL_ID}")
+    except Exception as e:
+        print("❌ Error publicando el panel:", e)
 
     print("Bot listo (Railway)")
 
@@ -308,4 +315,5 @@ if __name__ == "__main__":
     # Ejecuta todo en un solo loop
     asyncio.run(start_bot_and_web())
 asyncio.run(start_bot_and_web())
+
 
