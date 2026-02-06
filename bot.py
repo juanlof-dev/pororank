@@ -51,6 +51,7 @@ FLEX_ROLES = {
 }
 
 PANEL_CHANNEL_ID = 1468511949368197191
+PANEL_MESSAGE_ID = 1469250199678488720  # <-- ID del mensaje existente
 LOG_CHANNEL_ID = 1410499822334640156
 
 # ------------------ BOT ------------------
@@ -266,27 +267,16 @@ async def on_ready():
     try:
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
 
-        # Limpiar paneles antiguos
-        async for msg in channel.history(limit=10):
-            if msg.author == bot.user and msg.embeds:
-                await msg.delete()
+        # Tomar el mensaje existente en lugar de crear uno nuevo
+        panel_message = await channel.fetch_message(PANEL_MESSAGE_ID)
+        await panel_message.edit(view=Panel())
 
-        # Publicar embed
-        await channel.send(
-            embed=discord.Embed(
-                title="🎮 Vinculación LoL",
-                description="Gestiona tus cuentas de League of Legends usando los botones de abajo.",
-                color=0x9146FF
-            ),
-            view=Panel()
-        )
-
-        print(f"✅ Embed inicial publicado en {channel.name} ({channel.guild.name})")
+        print(f"✅ Embed existente con botones conectado correctamente en {channel.name} ({channel.guild.name})")
         bot.panel_publicado = True
 
     except Exception as e:
         import traceback
-        print("❌ Error publicando embed inicial:")
+        print("❌ Error conectando al embed existente:")
         traceback.print_exc()
 
     print("Bot listo (Railway)")
