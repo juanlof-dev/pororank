@@ -260,14 +260,16 @@ app.router.add_get("/", health)
 
 @bot.event
 async def on_ready():
-    await bot.wait_until_ready()  # garantiza que el bot esté conectado
-
+    await bot.wait_until_ready()
     bot.http = aiohttp.ClientSession()
     bot.db = await init_db()
     auto_refresh.start()
 
+    # Esperar hasta que el bot tenga al menos un guild cacheado
+    while not bot.guilds:
+        await asyncio.sleep(1)
+
     try:
-        # Obtener canal seguro
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
 
         # Evitar duplicados: borrar antiguos paneles del bot
@@ -275,7 +277,6 @@ async def on_ready():
             if msg.author == bot.user and msg.embeds:
                 await msg.delete()
 
-        # Enviar panel nuevo
         await channel.send(
             embed=discord.Embed(
                 title="🎮 Vinculación LoL",
@@ -287,7 +288,9 @@ async def on_ready():
         print(f"✅ Panel publicado en {channel.name} ({channel.guild.name})")
 
     except Exception as e:
-        print("❌ Error publicando panel:", e)
+        import traceback
+        print("❌ Error publicando panel:")
+        traceback.print_exc()
 
     print("Bot listo (Railway)")
 
@@ -310,6 +313,7 @@ if __name__ == "__main__":
     loop.create_task(start_web())      # corre health endpoint en background
     loop.create_task(bot.start(TOKEN)) # corre bot en el mismo loop
     loop.run_forever()                 # mantiene todo vivo
+
 
 
 
