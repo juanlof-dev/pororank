@@ -16,6 +16,7 @@ RIOT_API_KEY = os.getenv("RIOT_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ------------------ CONSTANTS ------------------
+
 REGIONS = {
     "EUW": ("euw1", "europe", 1409214841973112922),
     "LAN": ("la1", "americas", 1409214864064249990),
@@ -51,7 +52,7 @@ FLEX_ROLES = {
 }
 
 PANEL_CHANNEL_ID = 1468511949368197191
-PANEL_MESSAGE_ID = 1469250199678488720  # <-- ID del mensaje existente
+PANEL_MESSAGE_ID = 1469250199678488720  # Embed ya existente
 LOG_CHANNEL_ID = 1410499822334640156
 
 # ------------------ BOT ------------------
@@ -91,7 +92,6 @@ async def get_ranks(puuid, region):
     data = await riot_get(
         f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
     )
-
     solo = flex = "UNRANKED"
     if data:
         for q in data:
@@ -99,7 +99,6 @@ async def get_ranks(puuid, region):
                 solo = q["tier"]
             elif q["queueType"] == "RANKED_FLEX_SR":
                 flex = q["tier"]
-
     return solo, flex
 
 # ------------------ ROLES ------------------
@@ -125,18 +124,11 @@ async def log_change(guild, member, riot_id, changes, source):
     channel = guild.get_channel(LOG_CHANNEL_ID)
     if not channel:
         return
-
     embed = discord.Embed(title="Cambio de rango", color=0xED4245)
     embed.add_field(name="Usuario", value=member.mention, inline=False)
     embed.add_field(name="Cuenta", value=riot_id, inline=False)
-
     for c in changes:
-        embed.add_field(
-            name=c["type"],
-            value=f"{c['before']} → {c['after']}",
-            inline=False
-        )
-
+        embed.add_field(name=c["type"], value=f"{c['before']} → {c['after']}", inline=False)
     embed.add_field(name="Origen", value=source, inline=False)
     await channel.send(embed=embed)
 
@@ -155,25 +147,14 @@ class RegionDropdown(Select):
         region = self.values[0]
         acc = await validate_riot_id(self.name, self.tag, region)
         if not acc:
-            await interaction.response.send_message(
-                "❌ Riot ID inválido.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ Riot ID inválido.", ephemeral=True)
             return
-
         solo, flex = await get_ranks(acc["puuid"], region)
-
         async with bot.db.acquire() as conn:
             async with conn.transaction():
+                await conn.execute("UPDATE accounts SET is_primary=false WHERE user_id=$1", str(interaction.user.id))
                 await conn.execute(
-                    "UPDATE accounts SET is_primary=false WHERE user_id=$1",
-                    str(interaction.user.id)
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO accounts (user_id, riot_id, puuid, region, solo, flex, is_primary)
-                    VALUES ($1,$2,$3,$4,$5,$6,true)
-                    """,
+                    "INSERT INTO accounts (user_id, riot_id, puuid, region, solo, flex, is_primary) VALUES ($1,$2,$3,$4,$5,$6,true)",
                     str(interaction.user.id),
                     f"{self.name}#{self.tag}",
                     acc["puuid"],
@@ -181,12 +162,8 @@ class RegionDropdown(Select):
                     solo,
                     flex
                 )
-
         await apply_roles(interaction.user, region, solo, flex)
-        await interaction.response.send_message(
-            f"✅ **{self.name}#{self.tag}** vinculada",
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"✅ **{self.name}#{self.tag}** vinculada", ephemeral=True)
 
 class RegionView(View):
     def __init__(self, name, tag):
@@ -195,22 +172,13 @@ class RegionView(View):
 
 class LinkModal(Modal, title="Vincular cuenta LoL"):
     riot = TextInput(label="Riot ID (Nombre#TAG)")
-
     async def on_submit(self, interaction):
         try:
             name, tag = self.riot.value.split("#")
         except ValueError:
-            await interaction.response.send_message(
-                "❌ Formato incorrecto.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ Formato incorrecto.", ephemeral=True)
             return
-
-        await interaction.response.send_message(
-            "Selecciona región:",
-            view=RegionView(name, tag),
-            ephemeral=True
-        )
+        await interaction.response.send_message("Selecciona región:", view=RegionView(name, tag), ephemeral=True)
 
 # ------------------ PANEL ------------------
 
@@ -223,21 +191,13 @@ class Panel(View):
 
 @tasks.loop(hours=3)
 async def auto_refresh():
-    rows = await bot.db.fetch(
-        "SELECT * FROM accounts WHERE is_primary=true"
-    )
-
+    rows = await bot.db.fetch("SELECT * FROM accounts WHERE is_primary=true")
     for acc in rows:
         solo, flex = await get_ranks(acc["puuid"], acc["region"])
         await asyncio.sleep(1.2)
-
         if solo != acc["solo"] or flex != acc["flex"]:
             await bot.db.execute(
-                """
-                UPDATE accounts
-                SET solo=$1, flex=$2
-                WHERE user_id=$3 AND puuid=$4
-                """,
+                "UPDATE accounts SET solo=$1, flex=$2 WHERE user_id=$3 AND puuid=$4",
                 solo, flex, acc["user_id"], acc["puuid"]
             )
 
@@ -265,9 +225,9 @@ async def on_ready():
 
     try:
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
-        msg = await channel.fetch_message(1469250199678488720)
+        msg = await channel.fetch_message(PANEL_MESSAGE_ID)
         await msg.edit(view=Panel())
-        print("✅ Embed existente conectado con View correctamente")
+        print(f"✅ Embed existente conectado con View correctamente ({channel.guild.name})")
         bot.panel_publicado = True
     except Exception as e:
         import traceback
@@ -287,10 +247,7 @@ if __name__ == "__main__":
         await site.start()
         print("✅ Health endpoint corriendo")
 
-        # Bloquea aquí y conecta Discord
+        # Arranca Discord
         await bot.start(TOKEN)
 
     asyncio.run(main())
-
-
-
