@@ -260,31 +260,34 @@ app.router.add_get("/", health)
 
 @bot.event
 async def on_ready():
-    await bot.wait_until_ready()  # espera a que el bot se conecte
+    await bot.wait_until_ready()  # garantiza que el bot esté conectado
 
     bot.http = aiohttp.ClientSession()
     bot.db = await init_db()
     auto_refresh.start()
 
-    # Buscamos el canal a través de la guild
-    for guild in bot.guilds:
-        channel = guild.get_channel(PANEL_CHANNEL_ID)
-        if channel:
-            try:
-                await channel.send(
-                    embed=discord.Embed(
-                        title="🎮 Vinculación LoL",
-                        description="Gestiona tus cuentas",
-                        color=0x9146FF
-                    ),
-                    view=Panel()
-                )
-                print(f"✅ Panel publicado en {channel.name} ({guild.name})")
-            except Exception as e:
-                print("❌ Error publicando panel:", e)
-            break
-    else:
-        print(f"❌ No se encontró el canal {PANEL_CHANNEL_ID} en ninguna guild")
+    try:
+        # Obtener canal seguro
+        channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
+
+        # Evitar duplicados: borrar antiguos paneles del bot
+        async for msg in channel.history(limit=10):
+            if msg.author == bot.user and msg.embeds:
+                await msg.delete()
+
+        # Enviar panel nuevo
+        await channel.send(
+            embed=discord.Embed(
+                title="🎮 Vinculación LoL",
+                description="Gestiona tus cuentas",
+                color=0x9146FF
+            ),
+            view=Panel()
+        )
+        print(f"✅ Panel publicado en {channel.name} ({channel.guild.name})")
+
+    except Exception as e:
+        print("❌ Error publicando panel:", e)
 
     print("Bot listo (Railway)")
 
@@ -319,6 +322,7 @@ if __name__ == "__main__":
     # Ejecuta todo en un solo loop
     asyncio.run(start_bot_and_web())
 asyncio.run(start_bot_and_web())
+
 
 
 
