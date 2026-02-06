@@ -52,7 +52,7 @@ FLEX_ROLES = {
 }
 
 PANEL_CHANNEL_ID = 1468511949368197191
-PANEL_MESSAGE_ID = 1469250199678488720  # Embed ya existente
+PANEL_MESSAGE_ID = 1469250199678488720  # Tu mensaje existente
 LOG_CHANNEL_ID = 1410499822334640156
 
 # ------------------ BOT ------------------
@@ -92,6 +92,7 @@ async def get_ranks(puuid, region):
     data = await riot_get(
         f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
     )
+
     solo = flex = "UNRANKED"
     if data:
         for q in data:
@@ -99,6 +100,7 @@ async def get_ranks(puuid, region):
                 solo = q["tier"]
             elif q["queueType"] == "RANKED_FLEX_SR":
                 flex = q["tier"]
+
     return solo, flex
 
 # ------------------ ROLES ------------------
@@ -124,11 +126,18 @@ async def log_change(guild, member, riot_id, changes, source):
     channel = guild.get_channel(LOG_CHANNEL_ID)
     if not channel:
         return
+
     embed = discord.Embed(title="Cambio de rango", color=0xED4245)
     embed.add_field(name="Usuario", value=member.mention, inline=False)
     embed.add_field(name="Cuenta", value=riot_id, inline=False)
+
     for c in changes:
-        embed.add_field(name=c["type"], value=f"{c['before']} → {c['after']}", inline=False)
+        embed.add_field(
+            name=c["type"],
+            value=f"{c['before']} → {c['after']}",
+            inline=False
+        )
+
     embed.add_field(name="Origen", value=source, inline=False)
     await channel.send(embed=embed)
 
@@ -147,14 +156,25 @@ class RegionDropdown(Select):
         region = self.values[0]
         acc = await validate_riot_id(self.name, self.tag, region)
         if not acc:
-            await interaction.response.send_message("❌ Riot ID inválido.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Riot ID inválido.",
+                ephemeral=True
+            )
             return
+
         solo, flex = await get_ranks(acc["puuid"], region)
+
         async with bot.db.acquire() as conn:
             async with conn.transaction():
-                await conn.execute("UPDATE accounts SET is_primary=false WHERE user_id=$1", str(interaction.user.id))
                 await conn.execute(
-                    "INSERT INTO accounts (user_id, riot_id, puuid, region, solo, flex, is_primary) VALUES ($1,$2,$3,$4,$5,$6,true)",
+                    "UPDATE accounts SET is_primary=false WHERE user_id=$1",
+                    str(interaction.user.id)
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO accounts (user_id, riot_id, puuid, region, solo, flex, is_primary)
+                    VALUES ($1,$2,$3,$4,$5,$6,true)
+                    """,
                     str(interaction.user.id),
                     f"{self.name}#{self.tag}",
                     acc["puuid"],
@@ -162,8 +182,12 @@ class RegionDropdown(Select):
                     solo,
                     flex
                 )
+
         await apply_roles(interaction.user, region, solo, flex)
-        await interaction.response.send_message(f"✅ **{self.name}#{self.tag}** vinculada", ephemeral=True)
+        await interaction.response.send_message(
+            f"✅ **{self.name}#{self.tag}** vinculada",
+            ephemeral=True
+        )
 
 class RegionView(View):
     def __init__(self, name, tag):
@@ -172,13 +196,22 @@ class RegionView(View):
 
 class LinkModal(Modal, title="Vincular cuenta LoL"):
     riot = TextInput(label="Riot ID (Nombre#TAG)")
+
     async def on_submit(self, interaction):
         try:
             name, tag = self.riot.value.split("#")
         except ValueError:
-            await interaction.response.send_message("❌ Formato incorrecto.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Formato incorrecto.",
+                ephemeral=True
+            )
             return
-        await interaction.response.send_message("Selecciona región:", view=RegionView(name, tag), ephemeral=True)
+
+        await interaction.response.send_message(
+            "Selecciona región:",
+            view=RegionView(name, tag),
+            ephemeral=True
+        )
 
 # ------------------ PANEL ------------------
 
@@ -191,13 +224,21 @@ class Panel(View):
 
 @tasks.loop(hours=3)
 async def auto_refresh():
-    rows = await bot.db.fetch("SELECT * FROM accounts WHERE is_primary=true")
+    rows = await bot.db.fetch(
+        "SELECT * FROM accounts WHERE is_primary=true"
+    )
+
     for acc in rows:
         solo, flex = await get_ranks(acc["puuid"], acc["region"])
         await asyncio.sleep(1.2)
+
         if solo != acc["solo"] or flex != acc["flex"]:
             await bot.db.execute(
-                "UPDATE accounts SET solo=$1, flex=$2 WHERE user_id=$3 AND puuid=$4",
+                """
+                UPDATE accounts
+                SET solo=$1, flex=$2
+                WHERE user_id=$3 AND puuid=$4
+                """,
                 solo, flex, acc["user_id"], acc["puuid"]
             )
 
@@ -213,41 +254,46 @@ app.router.add_get("/", health)
 
 @bot.event
 async def on_ready():
-    if getattr(bot, "panel_publicado", False):
-        return
-
-    bot.http = aiohttp.ClientSession()
-    bot.db = await init_db()
+    print(f"✅ Bot conectado: {bot.user} ({len(bot.guilds)} guilds)")
+    # DB y HTTP ya inicializados en main()
     auto_refresh.start()
-
-    while not bot.guilds:
-        await asyncio.sleep(1)
-
-    try:
-        channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
-        msg = await channel.fetch_message(PANEL_MESSAGE_ID)
-        await msg.edit(view=Panel())
-        print(f"✅ Embed existente conectado con View correctamente ({channel.guild.name})")
-        bot.panel_publicado = True
-    except Exception as e:
-        import traceback
-        print("❌ Error conectando embed existente:")
-        traceback.print_exc()
-
-    print("Bot listo (Railway)")
 
 # ------------------ RUN ------------------
 
 if __name__ == "__main__":
+    import nest_asyncio
+    nest_asyncio.apply()
+
     async def main():
-        # Health endpoint Railway
+        # 1️⃣ Health endpoint Railway
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
         await site.start()
         print("✅ Health endpoint corriendo")
 
-        # Arranca Discord
-        await bot.start(TOKEN)
+        # 2️⃣ Login Discord, init DB y HTTP
+        await bot.login(TOKEN)
+        bot.http = aiohttp.ClientSession()
+        bot.db = await init_db()
+        auto_refresh.start()
+
+        # 3️⃣ Conectar el embed existente con View
+        async def attach_view():
+            await bot.wait_until_ready()
+            try:
+                channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
+                msg = await channel.fetch_message(PANEL_MESSAGE_ID)
+                await msg.edit(view=Panel())
+                print(f"✅ Embed existente conectado con View correctamente ({channel.guild.name})")
+            except Exception as e:
+                import traceback
+                print("❌ Error conectando embed existente:")
+                traceback.print_exc()
+
+        bot.loop.create_task(attach_view())
+
+        # 4️⃣ Conectar al gateway
+        await bot.connect()
 
     asyncio.run(main())
