@@ -260,36 +260,42 @@ app.router.add_get("/", health)
 
 @bot.event
 async def on_ready():
-    await bot.wait_until_ready()
+    await bot.wait_until_ready()  # Garantiza que el bot esté conectado
+
     bot.http = aiohttp.ClientSession()
     bot.db = await init_db()
     auto_refresh.start()
 
-    # Esperar hasta que el bot tenga al menos un guild cacheado
-    while not bot.guilds:
-        await asyncio.sleep(1)
-
     try:
+        # Espera a que el bot tenga al menos un guild
+        while not bot.guilds:
+            await asyncio.sleep(1)
+
+        # Obtener canal seguro
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
 
-        # Evitar duplicados: borrar antiguos paneles del bot
+        # Evitar duplicados: borrar antiguos mensajes del bot (solo embed simple)
         async for msg in channel.history(limit=10):
             if msg.author == bot.user and msg.embeds:
                 await msg.delete()
 
+        # Enviar embed visible, SIN View (para que se vea en Discord inmediatamente)
         await channel.send(
             embed=discord.Embed(
                 title="🎮 Vinculación LoL",
-                description="Gestiona tus cuentas",
+                description=(
+                    "Gestiona tus cuentas de League of Legends.\n\n"
+                    "Haz click en los botones de interacción para vincular tu cuenta y ver tus roles."
+                ),
                 color=0x9146FF
-            ),
-            view=Panel()
+            )
         )
-        print(f"✅ Panel publicado en {channel.name} ({channel.guild.name})")
+
+        print(f"✅ Embed inicial publicado en {channel.name} ({channel.guild.name})")
 
     except Exception as e:
         import traceback
-        print("❌ Error publicando panel:")
+        print("❌ Error publicando embed inicial:")
         traceback.print_exc()
 
     print("Bot listo (Railway)")
@@ -313,6 +319,7 @@ if __name__ == "__main__":
     loop.create_task(start_web())      # corre health endpoint en background
     loop.create_task(bot.start(TOKEN)) # corre bot en el mismo loop
     loop.run_forever()                 # mantiene todo vivo
+
 
 
 
