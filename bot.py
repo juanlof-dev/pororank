@@ -256,17 +256,14 @@ async def on_ready():
     if getattr(bot, "panel_publicado", False):
         return
 
-    # Inicializa HTTP y DB
     bot.http = aiohttp.ClientSession()
     bot.db = await init_db()
     auto_refresh.start()
 
-    # Espera que los guilds estén cargados
     while not bot.guilds:
         await asyncio.sleep(1)
 
     try:
-        # Conecta el embed existente con la View de botones
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
         msg = await channel.fetch_message(1469250199678488720)
         await msg.edit(view=Panel())
@@ -294,5 +291,6 @@ if __name__ == "__main__":
         await bot.start(TOKEN)
 
     asyncio.run(main())
+
 
 
