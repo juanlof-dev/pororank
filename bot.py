@@ -299,29 +299,18 @@ if __name__ == "__main__":
     import asyncio
     from aiohttp import web
 
-    async def start_bot_and_web():
-        try:
-            # Inicia el bot en background
-            bot_task = asyncio.create_task(bot.start(TOKEN))
+    async def start_web():
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+        await site.start()
+        print("✅ Health endpoint corriendo")
 
-            # Inicia el servidor web (health endpoint)
-            runner = web.AppRunner(app)
-            await runner.setup()
-            site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
-            await site.start()
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_web())      # corre health endpoint en background
+    loop.create_task(bot.start(TOKEN)) # corre bot en el mismo loop
+    loop.run_forever()                 # mantiene todo vivo
 
-            print("✅ Bot y health endpoint corriendo")
-
-            # Mantiene el bot vivo
-            await bot_task
-
-        except Exception as e:
-            print("❌ Error al iniciar bot:", e)
-            raise  # Permite que Railway vea que hubo error
-
-    # Ejecuta todo en un solo loop
-    asyncio.run(start_bot_and_web())
-asyncio.run(start_bot_and_web())
 
 
 
