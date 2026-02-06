@@ -263,7 +263,7 @@ async def on_ready():
 
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
 
-        # Borrar antiguos embeds del bot
+        # Borrar antiguos embeds
         async for msg in channel.history(limit=10):
             if msg.author == bot.user and msg.embeds:
                 await msg.delete()
@@ -271,9 +271,10 @@ async def on_ready():
         await channel.send(
             embed=discord.Embed(
                 title="🎮 Vinculación LoL",
-                description="Gestiona tus cuentas de League of Legends.\n\nHaz click en los botones de interacción para vincular tu cuenta y ver tus roles.",
+                description="Gestiona tus cuentas de League of Legends usando los botones de abajo.",
                 color=0x9146FF
-            )
+            ),
+            view=Panel()
         )
         print(f"✅ Embed inicial publicado en {channel.name} ({channel.guild.name})")
 
@@ -287,10 +288,6 @@ async def on_ready():
 # ------------------ RUN ------------------
 
 if __name__ == "__main__":
-    import nest_asyncio
-    nest_asyncio.apply()
-    import asyncio
-
     async def main():
         # Health endpoint
         runner = web.AppRunner(app)
@@ -299,7 +296,7 @@ if __name__ == "__main__":
         await site.start()
         print("✅ Health endpoint corriendo")
 
-        # Bot principal
+        # Bot principal bloqueante
         await bot.start(TOKEN)
 
     asyncio.run(main())
