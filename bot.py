@@ -254,21 +254,28 @@ app.router.add_get("/", health)
 @bot.event
 async def on_ready():
     if getattr(bot, "panel_publicado", False):
-        return  # evita duplicados si el bot se reconecta
+        return
 
-bot.http = aiohttp.ClientSession()
-bot.db = await init_db()
-auto_refresh.start()
+    # Inicializa HTTP y DB
+    bot.http = aiohttp.ClientSession()
+    bot.db = await init_db()
+    auto_refresh.start()
 
-try:
-    channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
-    msg = await channel.fetch_message(1469250199678488720)
-    await msg.edit(view=Panel())
-    print("✅ Embed existente conectado con View correctamente")
-except Exception as e:
-    import traceback
-    print("❌ Error conectando embed existente:")
-    traceback.print_exc()
+    # Espera que los guilds estén cargados
+    while not bot.guilds:
+        await asyncio.sleep(1)
+
+    try:
+        # Conecta el embed existente con la View de botones
+        channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
+        msg = await channel.fetch_message(1469250199678488720)
+        await msg.edit(view=Panel())
+        print("✅ Embed existente conectado con View correctamente")
+        bot.panel_publicado = True
+    except Exception as e:
+        import traceback
+        print("❌ Error conectando embed existente:")
+        traceback.print_exc()
 
     print("Bot listo (Railway)")
 
@@ -287,4 +294,5 @@ if __name__ == "__main__":
         await bot.start(TOKEN)
 
     asyncio.run(main())
+
 
