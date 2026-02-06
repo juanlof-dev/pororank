@@ -253,7 +253,6 @@ app.router.add_get("/", health)
 @bot.event
 async def on_ready():
     await bot.wait_until_ready()
-
     bot.http = aiohttp.ClientSession()
     bot.db = await init_db()
     auto_refresh.start()
@@ -264,7 +263,7 @@ async def on_ready():
 
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
 
-        # Evitar duplicados: solo embed inicial
+        # Borrar antiguos embeds del bot
         async for msg in channel.history(limit=10):
             if msg.author == bot.user and msg.embeds:
                 await msg.delete()
@@ -272,14 +271,10 @@ async def on_ready():
         await channel.send(
             embed=discord.Embed(
                 title="🎮 Vinculación LoL",
-                description=(
-                    "Gestiona tus cuentas de League of Legends.\n\n"
-                    "Haz click en los botones de interacción para vincular tu cuenta y ver tus roles."
-                ),
+                description="Gestiona tus cuentas de League of Legends.\n\nHaz click en los botones de interacción para vincular tu cuenta y ver tus roles.",
                 color=0x9146FF
             )
         )
-
         print(f"✅ Embed inicial publicado en {channel.name} ({channel.guild.name})")
 
     except Exception as e:
@@ -296,15 +291,15 @@ if __name__ == "__main__":
     nest_asyncio.apply()
     import asyncio
 
-    loop = asyncio.get_event_loop()
-
-    async def start_web():
+    async def main():
+        # Health endpoint
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
         await site.start()
         print("✅ Health endpoint corriendo")
 
-    loop.create_task(start_web())
-    loop.create_task(bot.start(TOKEN))
-    loop.run_forever()
+        # Bot principal
+        await bot.start(TOKEN)
+
+    asyncio.run(main())
