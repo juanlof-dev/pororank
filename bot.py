@@ -260,26 +260,26 @@ app.router.add_get("/", health)
 
 @bot.event
 async def on_ready():
-    await bot.wait_until_ready()  # Garantiza que el bot esté conectado
+    await bot.wait_until_ready()  # garantiza que el bot esté conectado
 
     bot.http = aiohttp.ClientSession()
     bot.db = await init_db()
     auto_refresh.start()
 
     try:
-        # Espera a que el bot tenga al menos un guild
+        # Espera a que al menos un guild esté cacheado
         while not bot.guilds:
             await asyncio.sleep(1)
 
         # Obtener canal seguro
         channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
 
-        # Evitar duplicados: borrar antiguos mensajes del bot (solo embed simple)
+        # Evitar duplicados: borrar antiguos mensajes del bot (solo embed)
         async for msg in channel.history(limit=10):
             if msg.author == bot.user and msg.embeds:
                 await msg.delete()
 
-        # Enviar embed visible, SIN View (para que se vea en Discord inmediatamente)
+        # Enviar embed inicial SIN View
         await channel.send(
             embed=discord.Embed(
                 title="🎮 Vinculación LoL",
@@ -299,7 +299,7 @@ async def on_ready():
         traceback.print_exc()
 
     print("Bot listo (Railway)")
-
+    
 # ------------------ RUN ------------------
 
 if __name__ == "__main__":
@@ -319,6 +319,7 @@ if __name__ == "__main__":
     loop.create_task(start_web())      # corre health endpoint en background
     loop.create_task(bot.start(TOKEN)) # corre bot en el mismo loop
     loop.run_forever()                 # mantiene todo vivo
+
 
 
 
