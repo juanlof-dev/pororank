@@ -91,6 +91,8 @@ def verification_embed(name, tag):
         ),
         color=0xF1C40F
     )
+
+    VERIFICATION_ICON_ID = 25
     embed.set_thumbnail(
         url=f"https://raw.communitydragon.org/latest/plugins/"
             f"rcp-be-lol-game-data/global/default/v1/profile-icons/{VERIFICATION_ICON_ID}.jpg"
