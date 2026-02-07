@@ -81,6 +81,8 @@ async def apply_roles(member, region, solo, flex):
 # ------------------ EMBEDS ------------------
 
 def verification_embed(name, tag):
+    VERIFICATION_ICON_ID = 25  # Ícono que debe ponerse el usuario
+
     embed = discord.Embed(
         title="🔐 Verificación de propiedad",
         description=(
@@ -92,13 +94,12 @@ def verification_embed(name, tag):
         color=0xF1C40F
     )
 
-VERIFICATION_ICON_ID = 25
-
-embed.set_thumbnail(
-    url=f"https://raw.communitydragon.org/latest/plugins/"
-        f"rcp-be-lol-game-data/global/default/v1/profile-icons/{VERIFICATION_ICON_ID}.jpg"
+    embed.set_thumbnail(
+        url=f"https://raw.communitydragon.org/latest/plugins/"
+            f"rcp-be-lol-game-data/global/default/v1/profile-icons/{VERIFICATION_ICON_ID}.jpg"
     )
-return embed
+    
+    return embed
 
 def build_account_embed(acc, summoner):
     icon_url = (
@@ -485,6 +486,7 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
 
