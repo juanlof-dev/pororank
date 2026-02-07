@@ -329,4 +329,23 @@ async def on_ready():
     auto_refresh.start()
     print("Bot listo")
 
+# ------------------ SERVIDOR WEB PARA UPTIMEROBOT ------------------
+from flask import Flask
+import threading
+import os
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot activo ✅", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 3000))
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_flask).start()
+
+# ------------------ INICIAR BOT ------------------
 bot.run(TOKEN)
+
