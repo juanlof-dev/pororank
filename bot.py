@@ -1,29 +1,16 @@
-import discord, aiohttp, json, os
+import discord, aiohttp, os
 from discord.ext import commands, tasks
 from discord.ui import View, Modal, TextInput, Select
 from urllib.parse import quote
 
 from config import *
+from database import load_data, save_data, init_db
 
 # ------------------ BOT ------------------
 
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-DATA_FILE = "accounts.json"
-
-# ------------------ DATA ------------------
-
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {}
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
 
 # ------------------ RIOT API ------------------
 
@@ -108,10 +95,7 @@ class RegionDropdown(Select):
             for r in REGIONS.keys()
         ]
 
-        super().__init__(
-            placeholder="Selecciona región",
-            options=options
-        )
+        super().__init__(placeholder="Selecciona región", options=options)
 
     async def callback(self, interaction):
         region = self.values[0]
@@ -196,10 +180,7 @@ class DeleteAccountSelect(Select):
             for i, a in enumerate(data)
         ]
 
-        super().__init__(
-            placeholder="Eliminar cuenta",
-            options=options
-        )
+        super().__init__(placeholder="Eliminar cuenta", options=options)
 
     async def callback(self, interaction):
         idx = int(self.values[0])
@@ -283,6 +264,9 @@ class Panel(View):
 
 async def deploy_panel():
     channel = bot.get_channel(PANEL_CHANNEL_ID)
+    if not channel:
+        return
+
     await channel.purge(limit=5)
 
     embed = discord.Embed(
@@ -293,18 +277,19 @@ async def deploy_panel():
             "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
             "🔹 **Actualizar datos:** Refresca tu rango automáticamente"
         ),
-        color=0x9146FF  # Un púrpura vibrante tipo League
+        color=0x9146FF
     )
 
-    embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png")
-    embed.set_footer(text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!", icon_url=bot.user.display_avatar.url)
-    embed.set_image(url="https://cdn.discordapp.com/attachments/108000000000000000/108000000000000001/lol_banner.png")  # opcional banner
+    embed.set_thumbnail(
+        url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png"
+    )
 
-    embed.add_field(name="📌 Instrucciones rápidas", value="Selecciona una opción usando los botones de abajo.", inline=False)
-    embed.add_field(name="💡 Tip", value="Nunca compartas tu contraseña ni información sensible.", inline=False)
+    embed.set_footer(
+        text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!",
+        icon_url=bot.user.display_avatar.url
+    )
 
     await channel.send(embed=embed, view=Panel())
-
 
 # ------------------ AUTO REFRESH ------------------
 
@@ -339,6 +324,7 @@ async def auto_refresh():
 
 @bot.event
 async def on_ready():
+    init_db()
     await deploy_panel()
     auto_refresh.start()
     print("Bot listo")
