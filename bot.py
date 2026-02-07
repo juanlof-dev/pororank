@@ -143,27 +143,47 @@ class VerifyIconView(View):
         custom_id="verify_icon"
     )
     async def verify(self, interaction, _):
+        # Asegurarnos de que solo el usuario correcto pueda usar el botón
         if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message("❌ Esta verificación no es tuya.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Esta verificación no es tuya.", ephemeral=True
+            )
             return
 
         pending = PENDING_VERIFICATIONS.get(self.user_id)
         if not pending:
-            await interaction.response.send_message("⏰ Verificación expirada.", ephemeral=True)
+            await interaction.response.send_message(
+                "⏰ Verificación expirada.", ephemeral=True
+            )
             return
 
+        # Obtener datos de la cuenta desde Riot
         summoner = await get_summoner_by_puuid(pending["puuid"], pending["region"])
-        if summoner["profileIconId"] != VERIFICATION_ICON_ID:
+        if not summoner:
             await interaction.response.send_message(
-                "❌ El icono no coincide. Cámbialo y vuelve a intentarlo.",
+                "❌ No se pudieron obtener datos de Riot. Intenta de nuevo más tarde.",
                 ephemeral=True
             )
             return
 
+        profile_icon = int(summoner.get("profileIconId", 0))
+
+        # Comparación con el icono de verificación
+        if profile_icon != VERIFICATION_ICON_ID:
+            await interaction.response.send_message(
+                f"❌ El icono no coincide. Debe ser **{VERIFICATION_ICON_ID}**, "
+                f"pero tu cuenta tiene **{profile_icon}**.\n"
+                "Cámbialo en el cliente de LoL y vuelve a intentarlo.",
+                ephemeral=True
+            )
+            return
+
+        # Obtener rangos
         solo, flex = await get_ranks(pending["puuid"], pending["region"])
         data = load_data()
         data.setdefault(self.user_id, [])
 
+        # Marcar todas las cuentas existentes como no principales
         for a in data[self.user_id]:
             a["primary"] = False
 
@@ -178,9 +198,12 @@ class VerifyIconView(View):
 
         data[self.user_id].append(acc)
         save_data(data)
-        await apply_roles(interaction.user, acc["region"], solo, flex)
 
+        # Aplicar roles y construir embed
+        await apply_roles(interaction.user, acc["region"], solo, flex)
         embed = build_account_embed(acc, summoner)
+
+        # Limpiar verificación pendiente
         del PENDING_VERIFICATIONS[self.user_id]
 
         await interaction.response.send_message(
@@ -486,6 +509,7 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
 
