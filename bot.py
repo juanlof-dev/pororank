@@ -20,7 +20,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ------------------ VERIFICACIÓN ------------------
 
 PENDING_VERIFICATIONS = {}
-VERIFICATION_ICON_ID = 29  # icono que debe ponerse el usuario
+VERIFICATION_ICON_ID = 25  # icono que debe ponerse el usuario
 
 # ------------------ RIOT API ------------------
 
@@ -509,6 +509,7 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
 
