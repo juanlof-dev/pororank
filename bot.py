@@ -86,15 +86,13 @@ class RegionDropdown(Select):
         self.name = name
         self.tag = tag
         options = [discord.SelectOption(label=r, value=r) for r in REGIONS.keys()]
-        super().__init__(placeholder="Selecciona región", options=options)
+        super().__init__(placeholder="Selecciona región", options=options, custom_id=f"region_dropdown_{name}_{tag}")
 
     async def callback(self, interaction):
         region = self.values[0]
         acc = await validate_riot_id(self.name, self.tag, region)
         if not acc:
-            await interaction.response.send_message(
-                "❌ Riot ID no válido o API inaccesible.", ephemeral=True
-            )
+            await interaction.response.send_message("❌ Riot ID no válido o API inaccesible.", ephemeral=True)
             return
 
         solo, flex = await get_ranks(acc["puuid"], region)
@@ -118,13 +116,12 @@ class RegionDropdown(Select):
         await apply_roles(interaction.user, region, solo, flex)
 
         await interaction.response.send_message(
-            f"✅ **{self.name}#{self.tag}** vinculada\nSoloQ: {solo}\nFlexQ: {flex}",
-            ephemeral=True
+            f"✅ **{self.name}#{self.tag}** vinculada\nSoloQ: {solo}\nFlexQ: {flex}", ephemeral=True
         )
 
 class RegionView(View):
     def __init__(self, name, tag):
-        super().__init__(timeout=None)  # nunca expira
+        super().__init__(timeout=None)
         self.add_item(RegionDropdown(name, tag))
 
 class LinkModal(Modal, title="Vincular cuenta LoL"):
@@ -140,14 +137,10 @@ class LinkModal(Modal, title="Vincular cuenta LoL"):
         try:
             name, tag = self.riot.value.strip().split("#")
         except ValueError:
-            await interaction.response.send_message(
-                "❌ Formato incorrecto. Usa Nombre#TAG", ephemeral=True
-            )
+            await interaction.response.send_message("❌ Formato incorrecto. Usa Nombre#TAG", ephemeral=True)
             return
 
-        await interaction.response.send_message(
-            "Selecciona la región:", view=RegionView(name, tag), ephemeral=True
-        )
+        await interaction.response.send_message("Selecciona la región:", view=RegionView(name, tag), ephemeral=True)
 
 # ------------------ VIEW / DELETE ACCOUNTS ------------------
 
@@ -156,12 +149,10 @@ class DeleteAccountSelect(Select):
         self.user_id = user_id
         data = load_data().get(user_id, [])
         options = [
-            discord.SelectOption(
-                label=f"{'⭐ ' if a['primary'] else ''}{a['riot_id']} ({a['region']})",
-                value=str(i)
-            ) for i, a in enumerate(data)
+            discord.SelectOption(label=f"{'⭐ ' if a['primary'] else ''}{a['riot_id']} ({a['region']})", value=str(i))
+            for i, a in enumerate(data)
         ]
-        super().__init__(placeholder="Eliminar cuenta", options=options)
+        super().__init__(placeholder="Eliminar cuenta", options=options, custom_id=f"delete_account_{user_id}")
 
     async def callback(self, interaction):
         idx = int(self.values[0])
@@ -171,70 +162,53 @@ class DeleteAccountSelect(Select):
 
         if accs:
             accs[0]["primary"] = True
-            await apply_roles(
-                interaction.user,
-                accs[0]["region"],
-                accs[0]["solo"],
-                accs[0]["flex"]
-            )
+            await apply_roles(interaction.user, accs[0]["region"], accs[0]["solo"], accs[0]["flex"])
         else:
             await clear_roles(interaction.user)
 
         save_data(data)
-        await interaction.response.send_message(
-            f"🗑️ Cuenta **{removed['riot_id']}** eliminada", ephemeral=True
-        )
+        await interaction.response.send_message(f"🗑️ Cuenta **{removed['riot_id']}** eliminada", ephemeral=True)
 
 class AccountsView(View):
     def __init__(self, user_id):
-        super().__init__(timeout=None)  # nunca expira
+        super().__init__(timeout=None)
         self.add_item(DeleteAccountSelect(user_id))
 
 # ------------------ PANEL ------------------
 
 class Panel(View):
     def __init__(self):
-        super().__init__(timeout=None)  # nunca expira
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="Vincular cuenta", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Vincular cuenta", style=discord.ButtonStyle.primary, custom_id="panel_link")
     async def link(self, interaction, _):
         await interaction.response.send_modal(LinkModal())
 
-    @discord.ui.button(label="Ver cuentas", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Ver cuentas", style=discord.ButtonStyle.secondary, custom_id="panel_view_accounts")
     async def view_accounts(self, interaction, _):
         data = load_data().get(str(interaction.user.id), [])
         if not data:
-            await interaction.response.send_message(
-                "No tienes cuentas vinculadas.", ephemeral=True
-            )
+            await interaction.response.send_message("No tienes cuentas vinculadas.", ephemeral=True)
             return
 
         msg = "\n".join(
-            f"{'⭐' if a['primary'] else ''} {a['riot_id']} | {a['region']} | "
-            f"SoloQ: {a['solo']} | FlexQ: {a['flex']}" for a in data
+            f"{'⭐' if a['primary'] else ''} {a['riot_id']} | {a['region']} | SoloQ: {a['solo']} | FlexQ: {a['flex']}"
+            for a in data
         )
+        await interaction.response.send_message(msg, view=AccountsView(str(interaction.user.id)), ephemeral=True)
 
-        await interaction.response.send_message(
-            msg, view=AccountsView(str(interaction.user.id)), ephemeral=True
-        )
-
-    @discord.ui.button(label="Actualizar datos", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Actualizar datos", style=discord.ButtonStyle.success, custom_id="panel_refresh")
     async def refresh(self, interaction, _):
         data = load_data()
         uid = str(interaction.user.id)
         if uid not in data:
-            await interaction.response.send_message(
-                "No tienes cuenta primaria.", ephemeral=True
-            )
+            await interaction.response.send_message("No tienes cuenta primaria.", ephemeral=True)
             return
 
         primary = next(a for a in data[uid] if a["primary"])
         solo, flex = await get_ranks(primary["puuid"], primary["region"])
         await apply_roles(interaction.user, primary["region"], solo, flex)
-
-        await interaction.response.send_message(
-            "🔄 Datos actualizados correctamente.", ephemeral=True
-        )
+        await interaction.response.send_message("🔄 Datos actualizados correctamente.", ephemeral=True)
 
 # ------------------ DEPLOY PANEL ------------------
 
@@ -256,14 +230,8 @@ async def deploy_panel():
         color=0x9146FF
     )
 
-    embed.set_thumbnail(
-        url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png"
-    )
-
-    embed.set_footer(
-        text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!",
-        icon_url=bot.user.display_avatar.url
-    )
+    embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png")
+    embed.set_footer(text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!", icon_url=bot.user.display_avatar.url)
 
     await channel.send(embed=embed, view=Panel())
 
@@ -300,10 +268,8 @@ async def auto_refresh():
 @bot.event
 async def on_ready():
     init_db()
-
-    # ----------------- REGISTRO DE VIEWS PERSISTENTES -----------------
-    bot.add_view(Panel())  # Panel principal
-
+    # registrar views persistentes
+    bot.add_view(Panel())
     await deploy_panel()
     auto_refresh.start()
     print("Bot listo")
