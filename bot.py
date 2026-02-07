@@ -61,7 +61,7 @@ async def get_ranks(puuid, region):
                 flex = q["tier"]
     return solo, flex
 
-# ------------------ ROLES (INTELIGENTES) ------------------
+# ------------------ ROLES (IDEMPOTENTES) ------------------
 
 def get_desired_roles(guild, region, solo, flex):
     roles = []
@@ -77,23 +77,28 @@ def get_desired_roles(guild, region, solo, flex):
     return set(roles)
 
 async def apply_roles(member, region, solo, flex):
-    desired_roles = get_desired_roles(member.guild, region, solo, flex)
+    desired = get_desired_roles(member.guild, region, solo, flex)
 
-    managed_role_ids = (
+    managed_ids = (
         list(SOLO_ROLES.values()) +
         list(FLEX_ROLES.values()) +
         [r[2] for r in REGIONS.values()]
     )
 
-    current_roles = {
-        r for r in member.roles if r.id in managed_role_ids
-    }
+    current = {r for r in member.roles if r.id in managed_ids}
 
-    to_add = desired_roles - current_roles
-    to_remove = current_roles - desired_roles
+    to_add = desired - current
+    to_remove = current - desired
 
     if not to_add and not to_remove:
-        return  # 👈 Nada cambió, no tocamos Discord
+        print(f"[ROLES] {member} sin cambios")
+        return
+
+    print(
+        f"[ROLES] {member} "
+        f"+{[r.name for r in to_add]} "
+        f"-{[r.name for r in to_remove]}"
+    )
 
     if to_remove:
         await member.remove_roles(*to_remove)
@@ -101,18 +106,15 @@ async def apply_roles(member, region, solo, flex):
         await member.add_roles(*to_add)
 
 async def clear_roles(member):
-    managed_role_ids = (
+    managed_ids = (
         list(SOLO_ROLES.values()) +
         list(FLEX_ROLES.values()) +
         [r[2] for r in REGIONS.values()]
     )
 
-    roles_to_remove = [
-        r for r in member.roles if r.id in managed_role_ids
-    ]
-
-    if roles_to_remove:
-        await member.remove_roles(*roles_to_remove)
+    roles = [r for r in member.roles if r.id in managed_ids]
+    if roles:
+        await member.remove_roles(*roles)
 
 # ------------------ EMBEDS ------------------
 
@@ -123,7 +125,7 @@ def verification_embed(name, tag):
             f"Para verificar que eres el dueño de **{name}#{tag}**:\n\n"
             "1️⃣ Abre League of Legends\n"
             "2️⃣ Cambia tu icono por el siguiente\n\n"
-            "Pulsa **He cambiado el icono** cuando esté listo"
+            "Pulsa **He cambiado el icono**"
         ),
         color=0xF1C40F
     )
@@ -147,16 +149,15 @@ def build_account_embed(acc, summoner):
     )
 
     embed.add_field(
-        name="Nivel",
+        name="",
         value=f"Lvl {summoner['summonerLevel']}",
         inline=False
     )
     embed.add_field(
-        name="Rank",
-        value=f"SoloQ: **{acc['solo']}** | FlexQ: **{acc['flex']}**",
+        name="",
+        value=f"SoloQ: **{acc['solo']}**    FlexQ: **{acc['flex']}**",
         inline=False
     )
-
     return embed
 
 # ------------------ VIEWS ------------------
@@ -166,22 +167,35 @@ class VerifyIconView(View):
         super().__init__(timeout=300)
         self.user_id = user_id
 
-    @discord.ui.button(label="He cambiado el icono", style=discord.ButtonStyle.success)
+    @discord.ui.button(
+        label="He cambiado el icono",
+        style=discord.ButtonStyle.success,
+        custom_id="verify_icon"
+    )
     async def verify(self, interaction, _):
         if str(interaction.user.id) != self.user_id:
-            return await interaction.response.send_message("❌ No es tu verificación.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ Esta verificación no es tuya.", ephemeral=True
+            )
 
         pending = PENDING_VERIFICATIONS.get(self.user_id)
         if not pending:
-            return await interaction.response.send_message("⏰ Verificación expirada.", ephemeral=True)
+            return await interaction.response.send_message(
+                "⏰ Verificación expirada.", ephemeral=True
+            )
 
-        summoner = await get_summoner_by_puuid(pending["puuid"], pending["region"])
+        summoner = await get_summoner_by_puuid(
+            pending["puuid"], pending["region"]
+        )
+
         if summoner["profileIconId"] != VERIFICATION_ICON_ID:
             return await interaction.response.send_message(
                 "❌ El icono no coincide.", ephemeral=True
             )
 
-        solo, flex = await get_ranks(pending["puuid"], pending["region"])
+        solo, flex = await get_ranks(
+            pending["puuid"], pending["region"]
+        )
 
         data = load_data()
         data.setdefault(self.user_id, [])
@@ -202,7 +216,6 @@ class VerifyIconView(View):
         save_data(data)
 
         await apply_roles(interaction.user, acc["region"], solo, flex)
-
         del PENDING_VERIFICATIONS[self.user_id]
 
         await interaction.response.send_message(
@@ -217,7 +230,11 @@ class Panel(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Actualizar datos", style=discord.ButtonStyle.success)
+    @discord.ui.button(
+        label="Actualizar datos",
+        style=discord.ButtonStyle.success,
+        custom_id="panel_refresh"
+    )
     async def refresh(self, interaction, _):
         data = load_data()
         uid = str(interaction.user.id)
@@ -228,7 +245,9 @@ class Panel(View):
             )
 
         primary = next(a for a in data[uid] if a["primary"])
-        solo, flex = await get_ranks(primary["puuid"], primary["region"])
+        solo, flex = await get_ranks(
+            primary["puuid"], primary["region"]
+        )
 
         if solo == primary["solo"] and flex == primary["flex"]:
             return await interaction.response.send_message(
@@ -239,13 +258,19 @@ class Panel(View):
         primary["flex"] = flex
         save_data(data)
 
-        await apply_roles(interaction.user, primary["region"], solo, flex)
-
-        await interaction.response.send_message(
-            "🔄 Rango actualizado.", ephemeral=True
+        await apply_roles(
+            interaction.user,
+            primary["region"],
+            solo,
+            flex
         )
 
-# ------------------ TAREA AUTOMÁTICA ------------------
+        await interaction.response.send_message(
+            "🔄 Datos actualizados correctamente.",
+            ephemeral=True
+        )
+
+# ------------------ TASK ------------------
 
 @tasks.loop(hours=12)
 async def update_ranks_loop():
@@ -256,10 +281,18 @@ async def update_ranks_loop():
         if not primary:
             continue
 
-        solo, flex = await get_ranks(primary["puuid"], primary["region"])
+        solo, flex = await get_ranks(
+            primary["puuid"], primary["region"]
+        )
 
         if solo == primary["solo"] and flex == primary["flex"]:
-            continue  # 👈 no cambió nada
+            print(f"[RANKS] {uid} sin cambios")
+            continue
+
+        print(
+            f"[RANKS] {uid} "
+            f"{primary['solo']}/{primary['flex']} → {solo}/{flex}"
+        )
 
         primary["solo"] = solo
         primary["flex"] = flex
@@ -268,7 +301,12 @@ async def update_ranks_loop():
         for guild in bot.guilds:
             member = guild.get_member(int(uid))
             if member:
-                await apply_roles(member, primary["region"], solo, flex)
+                await apply_roles(
+                    member,
+                    primary["region"],
+                    solo,
+                    flex
+                )
 
         await asyncio.sleep(0.5)
 
@@ -289,7 +327,10 @@ app = Flask(__name__)
 def home():
     return "Bot activo", 200
 
-threading.Thread(target=lambda: app.run(host="0.0.0.0", port=3000)).start()
+threading.Thread(
+    target=lambda: app.run(host="0.0.0.0", port=3000),
+    daemon=True
+).start()
 
 # ------------------ START ------------------
 
