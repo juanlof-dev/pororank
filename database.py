@@ -1,7 +1,7 @@
 import sqlite3
 import json
 
-DB_FILE = "accounts.db"
+DB_FILE = os.path.join("/data", "accounts.db")
 
 def get_conn():
     return sqlite3.connect(DB_FILE)
@@ -32,4 +32,5 @@ def save_data(data):
             VALUES (?, ?)
             ON CONFLICT(user_id)
             DO UPDATE SET data=excluded.data
+
             """, (uid, json.dumps(accs)))
