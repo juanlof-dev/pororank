@@ -2,6 +2,8 @@ import discord, aiohttp, os
 from discord.ext import commands, tasks
 from discord.ui import View, Modal, TextInput, Select
 from urllib.parse import quote
+from flask import Flask
+import threading
 
 from config import *
 from database import load_data, save_data, init_db
@@ -11,6 +13,11 @@ from database import load_data, save_data, init_db
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ------------------ VERIFICACIÓN ------------------
+
+PENDING_VERIFICATIONS = {}
+VERIFICATION_ICON_ID = 29  # cambia este ID si quieres otro icono
 
 # ------------------ RIOT API ------------------
 
@@ -25,10 +32,14 @@ async def riot_get(url):
 
 async def validate_riot_id(name, tag, region):
     _, routing, _ = REGIONS[region]
-    name = quote(name)
-    tag = quote(tag)
     return await riot_get(
-        f"https://{routing}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{name}/{tag}"
+        f"https://{routing}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{quote(name)}/{quote(tag)}"
+    )
+
+async def get_summoner_by_puuid(puuid, region):
+    platform, _, _ = REGIONS[region]
+    return await riot_get(
+        f"https://{platform}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}"
     )
 
 async def get_ranks(puuid, region):
@@ -62,22 +73,102 @@ async def apply_roles(member, region, solo, flex):
         member.guild.get_role(FLEX_ROLES[flex])
     )
 
-# ------------------ LOGS ------------------
+# ------------------ EMBEDS ------------------
 
-async def log_change(guild, member, riot_id, changes, source):
-    channel = guild.get_channel(LOG_CHANNEL_ID)
-    if not channel:
-        return
+def verification_embed(name, tag):
+    embed = discord.Embed(
+        title="🔐 Verificación de propiedad",
+        description=(
+            f"Para verificar que eres el dueño de **{name}#{tag}**:\n\n"
+            "1️⃣ Abre el cliente de **League of Legends**\n"
+            "2️⃣ Cambia tu **icono de invocador** por el siguiente\n\n"
+            "Cuando lo hayas hecho, pulsa **He cambiado el icono**"
+        ),
+        color=0xF1C40F
+    )
+    embed.set_thumbnail(
+        url=f"https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/profile-icons/{VERIFICATION_ICON_ID}.jpg"
+    )
+    return embed
 
-    embed = discord.Embed(title="Cambio de rango", color=0xED4245)
-    embed.add_field(name="Usuario", value=member.mention, inline=False)
-    embed.add_field(name="Cuenta", value=riot_id, inline=False)
+def build_account_embed(riot_id, summoner, region, solo, flex):
+    icon_url = (
+        f"https://raw.communitydragon.org/latest/plugins/"
+        f"rcp-be-lol-game-data/global/default/v1/profile-icons/{summoner['profileIconId']}.jpg"
+    )
 
-    for c in changes:
-        embed.add_field(name=c["type"], value=f"{c['before']} → {c['after']}", inline=False)
+    embed = discord.Embed(title="🎮 Cuenta de League of Legends", color=0x2ECC71)
+    embed.set_thumbnail(url=icon_url)
 
-    embed.add_field(name="Origen", value=source, inline=False)
-    await channel.send(embed=embed)
+    embed.add_field(name="Nombre de invocador", value=f"{riot_id} ({region})", inline=True)
+    embed.add_field(name="Nivel", value=summoner["summonerLevel"], inline=True)
+    embed.add_field(name="Clasificación Solo/Duo", value=solo, inline=False)
+    embed.add_field(name="Clasificación Flexible", value=flex, inline=False)
+
+    return embed
+
+# ------------------ VERIFICACIÓN VIEW ------------------
+
+class VerifyIconView(View):
+    def __init__(self, user_id):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    @discord.ui.button(label="He cambiado el icono", style=discord.ButtonStyle.success)
+    async def verify(self, interaction, _):
+        uid = str(interaction.user.id)
+
+        if uid != self.user_id:
+            await interaction.response.send_message("❌ Esta verificación no es tuya.", ephemeral=True)
+            return
+
+        pending = PENDING_VERIFICATIONS.get(uid)
+        if not pending:
+            await interaction.response.send_message("⏰ Verificación expirada.", ephemeral=True)
+            return
+
+        summoner = await get_summoner_by_puuid(pending["puuid"], pending["region"])
+        if summoner["profileIconId"] != VERIFICATION_ICON_ID:
+            await interaction.response.send_message(
+                "❌ El icono no coincide. Cámbialo y vuelve a intentarlo.",
+                ephemeral=True
+            )
+            return
+
+        solo, flex = await get_ranks(pending["puuid"], pending["region"])
+        data = load_data()
+        data.setdefault(uid, [])
+
+        for a in data[uid]:
+            a["primary"] = False
+
+        data[uid].append({
+            "riot_id": pending["riot_id"],
+            "puuid": pending["puuid"],
+            "region": pending["region"],
+            "solo": solo,
+            "flex": flex,
+            "primary": True
+        })
+
+        save_data(data)
+        await apply_roles(interaction.user, pending["region"], solo, flex)
+
+        embed = build_account_embed(
+            pending["riot_id"],
+            summoner,
+            pending["region"],
+            solo,
+            flex
+        )
+
+        del PENDING_VERIFICATIONS[uid]
+
+        await interaction.response.send_message(
+            "✅ **Cuenta vinculada correctamente**",
+            embed=embed,
+            ephemeral=True
+        )
 
 # ------------------ LINK FLOW ------------------
 
@@ -86,93 +177,48 @@ class RegionDropdown(Select):
         self.name = name
         self.tag = tag
         options = [discord.SelectOption(label=r, value=r) for r in REGIONS.keys()]
-        super().__init__(placeholder="Selecciona región", options=options, custom_id=f"region_dropdown_{name}_{tag}")
+        super().__init__(placeholder="Selecciona región", options=options)
 
     async def callback(self, interaction):
         region = self.values[0]
         acc = await validate_riot_id(self.name, self.tag, region)
+
         if not acc:
-            await interaction.response.send_message("❌ Riot ID no válido o API inaccesible.", ephemeral=True)
+            await interaction.response.send_message("❌ Riot ID no válido.", ephemeral=True)
             return
 
-        solo, flex = await get_ranks(acc["puuid"], region)
-        data = load_data()
-        uid = str(interaction.user.id)
-        data.setdefault(uid, [])
-
-        for a in data[uid]:
-            a["primary"] = False
-
-        data[uid].append({
+        PENDING_VERIFICATIONS[str(interaction.user.id)] = {
             "riot_id": f"{self.name}#{self.tag}",
             "puuid": acc["puuid"],
-            "region": region,
-            "solo": solo,
-            "flex": flex,
-            "primary": True
-        })
-
-        save_data(data)
-        await apply_roles(interaction.user, region, solo, flex)
+            "region": region
+        }
 
         await interaction.response.send_message(
-            f"✅ **{self.name}#{self.tag}** vinculada\nSoloQ: {solo}\nFlexQ: {flex}", ephemeral=True
+            embed=verification_embed(self.name, self.tag),
+            view=VerifyIconView(str(interaction.user.id)),
+            ephemeral=True
         )
 
 class RegionView(View):
     def __init__(self, name, tag):
-        super().__init__(timeout=None)
+        super().__init__()
         self.add_item(RegionDropdown(name, tag))
 
 class LinkModal(Modal, title="Vincular cuenta LoL"):
-    warning = TextInput(
-        label="Aviso",
-        default="⚠️ Nunca compartas contraseñas ni información confidencial.",
-        required=False,
-        style=discord.TextStyle.paragraph
-    )
     riot = TextInput(label="Riot ID (Nombre#TAG)")
 
     async def on_submit(self, interaction):
         try:
             name, tag = self.riot.value.strip().split("#")
         except ValueError:
-            await interaction.response.send_message("❌ Formato incorrecto. Usa Nombre#TAG", ephemeral=True)
+            await interaction.response.send_message("❌ Formato incorrecto.", ephemeral=True)
             return
 
-        await interaction.response.send_message("Selecciona la región:", view=RegionView(name, tag), ephemeral=True)
-
-# ------------------ VIEW / DELETE ACCOUNTS ------------------
-
-class DeleteAccountSelect(Select):
-    def __init__(self, user_id):
-        self.user_id = user_id
-        data = load_data().get(user_id, [])
-        options = [
-            discord.SelectOption(label=f"{'⭐ ' if a['primary'] else ''}{a['riot_id']} ({a['region']})", value=str(i))
-            for i, a in enumerate(data)
-        ]
-        super().__init__(placeholder="Eliminar cuenta", options=options, custom_id=f"delete_account_{user_id}")
-
-    async def callback(self, interaction):
-        idx = int(self.values[0])
-        data = load_data()
-        accs = data.get(self.user_id, [])
-        removed = accs.pop(idx)
-
-        if accs:
-            accs[0]["primary"] = True
-            await apply_roles(interaction.user, accs[0]["region"], accs[0]["solo"], accs[0]["flex"])
-        else:
-            await clear_roles(interaction.user)
-
-        save_data(data)
-        await interaction.response.send_message(f"🗑️ Cuenta **{removed['riot_id']}** eliminada", ephemeral=True)
-
-class AccountsView(View):
-    def __init__(self, user_id):
-        super().__init__(timeout=None)
-        self.add_item(DeleteAccountSelect(user_id))
+        await interaction.response.send_message(
+            "Selecciona la región:",
+            view=RegionView(name, tag),
+            ephemeral=True
+        )
 
 # ------------------ PANEL ------------------
 
@@ -180,115 +226,64 @@ class Panel(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Vincular cuenta", style=discord.ButtonStyle.primary, custom_id="panel_link")
+    @discord.ui.button(label="Vincular cuenta", style=discord.ButtonStyle.primary)
     async def link(self, interaction, _):
         await interaction.response.send_modal(LinkModal())
 
-    @discord.ui.button(label="Ver cuentas", style=discord.ButtonStyle.secondary, custom_id="panel_view_accounts")
+    @discord.ui.button(label="Ver cuentas", style=discord.ButtonStyle.secondary)
     async def view_accounts(self, interaction, _):
         data = load_data().get(str(interaction.user.id), [])
         if not data:
             await interaction.response.send_message("No tienes cuentas vinculadas.", ephemeral=True)
             return
 
-        msg = "\n".join(
-            f"{'⭐' if a['primary'] else ''} {a['riot_id']} | {a['region']} | SoloQ: {a['solo']} | FlexQ: {a['flex']}"
-            for a in data
-        )
-        await interaction.response.send_message(msg, view=AccountsView(str(interaction.user.id)), ephemeral=True)
-
-    @discord.ui.button(label="Actualizar datos", style=discord.ButtonStyle.success, custom_id="panel_refresh")
-    async def refresh(self, interaction, _):
-        data = load_data()
-        uid = str(interaction.user.id)
-        if uid not in data:
-            await interaction.response.send_message("No tienes cuenta primaria.", ephemeral=True)
-            return
-
-        primary = next(a for a in data[uid] if a["primary"])
-        solo, flex = await get_ranks(primary["puuid"], primary["region"])
-        await apply_roles(interaction.user, primary["region"], solo, flex)
-        await interaction.response.send_message("🔄 Datos actualizados correctamente.", ephemeral=True)
+        for acc in data:
+            summoner = await get_summoner_by_puuid(acc["puuid"], acc["region"])
+            embed = build_account_embed(
+                acc["riot_id"],
+                summoner,
+                acc["region"],
+                acc["solo"],
+                acc["flex"]
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ------------------ DEPLOY PANEL ------------------
 
 async def deploy_panel():
     channel = bot.get_channel(PANEL_CHANNEL_ID)
-    if not channel:
-        return
-
     await channel.purge(limit=5)
 
     embed = discord.Embed(
         title="🎮 Vinculación de Cuentas LoL",
-        description=(
-            "Gestiona tus cuentas de **League of Legends**, roles y rangos directamente desde este panel.\n\n"
-            "🔹 **Vincular cuenta:** Añade tu cuenta de LoL\n"
-            "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
-            "🔹 **Actualizar datos:** Refresca tu rango automáticamente"
-        ),
+        description="Gestiona tus cuentas de League of Legends desde aquí.",
         color=0x9146FF
     )
 
-    embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png")
-    embed.set_footer(text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!", icon_url=bot.user.display_avatar.url)
-
     await channel.send(embed=embed, view=Panel())
-
-# ------------------ AUTO REFRESH ------------------
-
-@tasks.loop(hours=3)
-async def auto_refresh():
-    data = load_data()
-    for guild in bot.guilds:
-        for member in guild.members:
-            uid = str(member.id)
-            if uid not in data:
-                continue
-
-            primary = next(a for a in data[uid] if a["primary"])
-            solo, flex = await get_ranks(primary["puuid"], primary["region"])
-
-            changes = []
-            if solo != primary["solo"]:
-                changes.append({"type": "SoloQ", "before": primary["solo"], "after": solo})
-                primary["solo"] = solo
-            if flex != primary["flex"]:
-                changes.append({"type": "FlexQ", "before": primary["flex"], "after": flex})
-                primary["flex"] = flex
-
-            if changes:
-                await apply_roles(member, primary["region"], solo, flex)
-                await log_change(guild, member, primary["riot_id"], changes, "AUTO_REFRESH")
-
-    save_data(data)
 
 # ------------------ READY ------------------
 
 @bot.event
 async def on_ready():
     init_db()
-    # registrar views persistentes
     bot.add_view(Panel())
     await deploy_panel()
-    auto_refresh.start()
     print("Bot listo")
 
-# ------------------ SERVIDOR WEB PARA UPTIMEROBOT ------------------
-from flask import Flask
-import threading
+# ------------------ WEB SERVER ------------------
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot activo ✅", 200
+    return "Bot activo", 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
 
 threading.Thread(target=run_flask).start()
 
-# ------------------ INICIAR BOT ------------------
+# ------------------ START ------------------
+
 bot.run(TOKEN)
