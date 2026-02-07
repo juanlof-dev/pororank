@@ -445,7 +445,7 @@ async def update_ranks_loop():
 async def on_ready():
     init_db()
     bot.add_view(Panel())
-    bot.add_view(AccountActionsView("0", 0))
+    bot.add_view(AccountActionsView("0", 0, False))
     await deploy_panel()
 
     # <--- Inicia la tarea automática de actualización de ranks
@@ -469,6 +469,7 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
 
