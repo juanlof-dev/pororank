@@ -453,7 +453,7 @@ async def deploy_panel():
 
 # ------------------ TAREA AUTOMÁTICA DE RANKS ------------------
 
-@tasks.loop(hours=3)
+@tasks.loop(hours=12)
 async def update_ranks_loop():
     print("🔄 Actualizando ranks de todos los usuarios...")
     data = load_data()
@@ -509,6 +509,7 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
 
