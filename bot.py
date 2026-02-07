@@ -98,7 +98,7 @@ embed.set_thumbnail(
     url=f"https://raw.communitydragon.org/latest/plugins/"
         f"rcp-be-lol-game-data/global/default/v1/profile-icons/{VERIFICATION_ICON_ID}.jpg"
     )
-    return embed
+return embed
 
 def build_account_embed(acc, summoner):
     icon_url = (
@@ -485,6 +485,7 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
 
