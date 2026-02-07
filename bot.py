@@ -2,6 +2,7 @@ import discord
 import aiohttp
 import os
 import threading
+import asyncio  # <-- asegurarnos de que esté importado
 from urllib.parse import quote
 from discord.ext import commands, tasks
 from discord.ui import View, Modal, TextInput, Select
@@ -433,6 +434,9 @@ async def update_ranks_loop():
             if member:
                 await apply_roles(member, primary_acc["region"], solo, flex)
 
+        # <-- Pausa para no saturar la API
+        await asyncio.sleep(0.5)
+
     print("✅ Ranks actualizados correctamente.")
 
 # ------------------ READY ------------------
@@ -465,5 +469,6 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
