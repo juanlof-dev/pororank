@@ -1,59 +1,9 @@
-import os
-import asyncio
-import discord
-import aiohttp
-import asyncpg
-
+import discord, aiohttp, json, os
 from discord.ext import commands, tasks
 from discord.ui import View, Modal, TextInput, Select
 from urllib.parse import quote
-from aiohttp import web
 
-# ------------------ CONFIG ------------------
-
-TOKEN = os.getenv("TOKEN")
-RIOT_API_KEY = os.getenv("RIOT_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-# ------------------ CONSTANTS ------------------
-
-REGIONS = {
-    "EUW": ("euw1", "europe", 1409214841973112922),
-    "LAN": ("la1", "americas", 1409214864064249990),
-    "LAS": ("la2", "americas", 1415758108428341379),
-}
-
-SOLO_ROLES = {
-    "UNRANKED": 1409215402999021753,
-    "IRON": 1409215359952748565,
-    "BRONZE": 1409215350373093570,
-    "SILVER": 1409215342131286078,
-    "GOLD": 1409215329758089226,
-    "PLATINUM": 1409215319247163395,
-    "EMERALD": 1409215310388662492,
-    "DIAMOND": 1409215300452483194,
-    "MASTER": 1409215289618333748,
-    "GRANDMASTER": 1409215275601104996,
-    "CHALLENGER": 1409214980653449307,
-}
-
-FLEX_ROLES = {
-    "UNRANKED": 1468523211057528842,
-    "IRON": 1468522994912727182,
-    "BRONZE": 1468523378225840243,
-    "SILVER": 1468523546975142004,
-    "GOLD": 1468523603644514439,
-    "PLATINUM": 1468523665040867401,
-    "EMERALD": 1468523732791459991,
-    "DIAMOND": 1468523804400554096,
-    "MASTER": 1468523868913406017,
-    "GRANDMASTER": 1468523924731199573,
-    "CHALLENGER": 1468523984227405835,
-}
-
-PANEL_CHANNEL_ID = 1468511949368197191
-PANEL_MESSAGE_ID = 1469250199678488720  # Tu mensaje existente
-LOG_CHANNEL_ID = 1410499822334640156
+from config import *
 
 # ------------------ BOT ------------------
 
@@ -61,30 +11,39 @@ intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ------------------ DB ------------------
+DATA_FILE = "accounts.json"
 
-async def init_db():
-    return await asyncpg.create_pool(
-        DATABASE_URL,
-        min_size=1,
-        max_size=5
-    )
+# ------------------ DATA ------------------
+
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
 
 # ------------------ RIOT API ------------------
 
 async def riot_get(url):
     headers = {"X-Riot-Token": RIOT_API_KEY}
-    async with bot.http.get(url, headers=headers) as r:
-        if r.status != 200:
-            print("Riot API error:", r.status, url)
-            return None
-        return await r.json()
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url, headers=headers) as r:
+            if r.status != 200:
+                print("Riot API error:", r.status, url)
+                return None
+            return await r.json()
 
 async def validate_riot_id(name, tag, region):
     _, routing, _ = REGIONS[region]
+
+    name = quote(name)
+    tag = quote(tag)
+
     return await riot_get(
-        f"https://{routing}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/"
-        f"{quote(name)}/{quote(tag)}"
+        f"https://{routing}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{name}/{tag}"
     )
 
 async def get_ranks(puuid, region):
@@ -132,60 +91,63 @@ async def log_change(guild, member, riot_id, changes, source):
     embed.add_field(name="Cuenta", value=riot_id, inline=False)
 
     for c in changes:
-        embed.add_field(
-            name=c["type"],
-            value=f"{c['before']} → {c['after']}",
-            inline=False
-        )
+        embed.add_field(name=c["type"], value=f"{c['before']} → {c['after']}", inline=False)
 
     embed.add_field(name="Origen", value=source, inline=False)
     await channel.send(embed=embed)
 
-# ------------------ UI ------------------
+# ------------------ LINK FLOW ------------------
 
 class RegionDropdown(Select):
     def __init__(self, name, tag):
         self.name = name
         self.tag = tag
+
+        options = [
+            discord.SelectOption(label=r, value=r)
+            for r in REGIONS.keys()
+        ]
+
         super().__init__(
             placeholder="Selecciona región",
-            options=[discord.SelectOption(label=r, value=r) for r in REGIONS]
+            options=options
         )
 
     async def callback(self, interaction):
         region = self.values[0]
+
         acc = await validate_riot_id(self.name, self.tag, region)
         if not acc:
             await interaction.response.send_message(
-                "❌ Riot ID inválido.",
+                "❌ Riot ID no válido o API inaccesible.",
                 ephemeral=True
             )
             return
 
         solo, flex = await get_ranks(acc["puuid"], region)
 
-        async with bot.db.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    "UPDATE accounts SET is_primary=false WHERE user_id=$1",
-                    str(interaction.user.id)
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO accounts (user_id, riot_id, puuid, region, solo, flex, is_primary)
-                    VALUES ($1,$2,$3,$4,$5,$6,true)
-                    """,
-                    str(interaction.user.id),
-                    f"{self.name}#{self.tag}",
-                    acc["puuid"],
-                    region,
-                    solo,
-                    flex
-                )
+        data = load_data()
+        uid = str(interaction.user.id)
+        data.setdefault(uid, [])
 
+        for a in data[uid]:
+            a["primary"] = False
+
+        data[uid].append({
+            "riot_id": f"{self.name}#{self.tag}",
+            "puuid": acc["puuid"],
+            "region": region,
+            "solo": solo,
+            "flex": flex,
+            "primary": True
+        })
+
+        save_data(data)
         await apply_roles(interaction.user, region, solo, flex)
+
         await interaction.response.send_message(
-            f"✅ **{self.name}#{self.tag}** vinculada",
+            f"✅ **{self.name}#{self.tag}** vinculada\n"
+            f"SoloQ: {solo}\nFlexQ: {flex}",
             ephemeral=True
         )
 
@@ -195,23 +157,77 @@ class RegionView(View):
         self.add_item(RegionDropdown(name, tag))
 
 class LinkModal(Modal, title="Vincular cuenta LoL"):
+    warning = TextInput(
+        label="Aviso",
+        default="⚠️ Nunca compartas contraseñas ni información confidencial.",
+        required=False,
+        style=discord.TextStyle.paragraph
+    )
     riot = TextInput(label="Riot ID (Nombre#TAG)")
 
     async def on_submit(self, interaction):
         try:
-            name, tag = self.riot.value.split("#")
+            name, tag = self.riot.value.strip().split("#")
         except ValueError:
             await interaction.response.send_message(
-                "❌ Formato incorrecto.",
+                "❌ Formato incorrecto. Usa Nombre#TAG",
                 ephemeral=True
             )
             return
 
         await interaction.response.send_message(
-            "Selecciona región:",
+            "Selecciona la región:",
             view=RegionView(name, tag),
             ephemeral=True
         )
+
+# ------------------ VIEW / DELETE ACCOUNTS ------------------
+
+class DeleteAccountSelect(Select):
+    def __init__(self, user_id):
+        self.user_id = user_id
+        data = load_data().get(user_id, [])
+
+        options = [
+            discord.SelectOption(
+                label=f"{'⭐ ' if a['primary'] else ''}{a['riot_id']} ({a['region']})",
+                value=str(i)
+            )
+            for i, a in enumerate(data)
+        ]
+
+        super().__init__(
+            placeholder="Eliminar cuenta",
+            options=options
+        )
+
+    async def callback(self, interaction):
+        idx = int(self.values[0])
+        data = load_data()
+        accs = data.get(self.user_id, [])
+        removed = accs.pop(idx)
+
+        if accs:
+            accs[0]["primary"] = True
+            await apply_roles(
+                interaction.user,
+                accs[0]["region"],
+                accs[0]["solo"],
+                accs[0]["flex"]
+            )
+        else:
+            await clear_roles(interaction.user)
+
+        save_data(data)
+        await interaction.response.send_message(
+            f"🗑️ Cuenta **{removed['riot_id']}** eliminada",
+            ephemeral=True
+        )
+
+class AccountsView(View):
+    def __init__(self, user_id):
+        super().__init__(timeout=60)
+        self.add_item(DeleteAccountSelect(user_id))
 
 # ------------------ PANEL ------------------
 
@@ -220,80 +236,111 @@ class Panel(View):
     async def link(self, interaction, _):
         await interaction.response.send_modal(LinkModal())
 
+    @discord.ui.button(label="Ver cuentas", style=discord.ButtonStyle.secondary)
+    async def view_accounts(self, interaction, _):
+        data = load_data().get(str(interaction.user.id), [])
+        if not data:
+            await interaction.response.send_message(
+                "No tienes cuentas vinculadas.",
+                ephemeral=True
+            )
+            return
+
+        msg = "\n".join(
+            f"{'⭐' if a['primary'] else ''} {a['riot_id']} | {a['region']} | "
+            f"SoloQ: {a['solo']} | FlexQ: {a['flex']}"
+            for a in data
+        )
+
+        await interaction.response.send_message(
+            msg,
+            view=AccountsView(str(interaction.user.id)),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Actualizar datos", style=discord.ButtonStyle.success)
+    async def refresh(self, interaction, _):
+        data = load_data()
+        uid = str(interaction.user.id)
+        if uid not in data:
+            await interaction.response.send_message(
+                "No tienes cuenta primaria.",
+                ephemeral=True
+            )
+            return
+
+        primary = next(a for a in data[uid] if a["primary"])
+        solo, flex = await get_ranks(primary["puuid"], primary["region"])
+
+        await apply_roles(interaction.user, primary["region"], solo, flex)
+
+        await interaction.response.send_message(
+            "🔄 Datos actualizados correctamente.",
+            ephemeral=True
+        )
+
+# ------------------ DEPLOY PANEL ------------------
+
+async def deploy_panel():
+    channel = bot.get_channel(PANEL_CHANNEL_ID)
+    await channel.purge(limit=5)
+
+    embed = discord.Embed(
+        title="🎮 Vinculación de Cuentas LoL",
+        description=(
+            "Gestiona tus cuentas de **League of Legends**, roles y rangos directamente desde este panel.\n\n"
+            "🔹 **Vincular cuenta:** Añade tu cuenta de LoL\n"
+            "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
+            "🔹 **Actualizar datos:** Refresca tu rango automáticamente"
+        ),
+        color=0x9146FF  # Un púrpura vibrante tipo League
+    )
+
+    embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png")
+    embed.set_footer(text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!", icon_url=bot.user.display_avatar.url)
+    embed.set_image(url="https://cdn.discordapp.com/attachments/108000000000000000/108000000000000001/lol_banner.png")  # opcional banner
+
+    embed.add_field(name="📌 Instrucciones rápidas", value="Selecciona una opción usando los botones de abajo.", inline=False)
+    embed.add_field(name="💡 Tip", value="Nunca compartas tu contraseña ni información sensible.", inline=False)
+
+    await channel.send(embed=embed, view=Panel())
+
+
 # ------------------ AUTO REFRESH ------------------
 
 @tasks.loop(hours=3)
 async def auto_refresh():
-    rows = await bot.db.fetch(
-        "SELECT * FROM accounts WHERE is_primary=true"
-    )
+    data = load_data()
 
-    for acc in rows:
-        solo, flex = await get_ranks(acc["puuid"], acc["region"])
-        await asyncio.sleep(1.2)
+    for guild in bot.guilds:
+        for member in guild.members:
+            uid = str(member.id)
+            if uid not in data:
+                continue
 
-        if solo != acc["solo"] or flex != acc["flex"]:
-            await bot.db.execute(
-                """
-                UPDATE accounts
-                SET solo=$1, flex=$2
-                WHERE user_id=$3 AND puuid=$4
-                """,
-                solo, flex, acc["user_id"], acc["puuid"]
-            )
+            primary = next(a for a in data[uid] if a["primary"])
+            solo, flex = await get_ranks(primary["puuid"], primary["region"])
 
-# ------------------ HEALTH ------------------
+            changes = []
+            if solo != primary["solo"]:
+                changes.append({"type": "SoloQ", "before": primary["solo"], "after": solo})
+                primary["solo"] = solo
+            if flex != primary["flex"]:
+                changes.append({"type": "FlexQ", "before": primary["flex"], "after": flex})
+                primary["flex"] = flex
 
-async def health(request):
-    return web.Response(text="ok")
+            if changes:
+                await apply_roles(member, primary["region"], solo, flex)
+                await log_change(guild, member, primary["riot_id"], changes, "AUTO_REFRESH")
 
-app = web.Application()
-app.router.add_get("/", health)
+    save_data(data)
 
 # ------------------ READY ------------------
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot conectado: {bot.user} ({len(bot.guilds)} guilds)")
-    # DB y HTTP ya inicializados en main()
+    await deploy_panel()
     auto_refresh.start()
+    print("Bot listo")
 
-# ------------------ RUN ------------------
-
-if __name__ == "__main__":
-    import nest_asyncio
-    nest_asyncio.apply()
-
-    async def main():
-        # 1️⃣ Health endpoint Railway
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
-        await site.start()
-        print("✅ Health endpoint corriendo")
-
-        # 2️⃣ Login Discord, init DB y HTTP
-        await bot.login(TOKEN)
-        bot.http = aiohttp.ClientSession()
-        bot.db = await init_db()
-        auto_refresh.start()
-
-        # 3️⃣ Conectar el embed existente con View
-        async def attach_view():
-            await bot.wait_until_ready()
-            try:
-                channel = await bot.fetch_channel(PANEL_CHANNEL_ID)
-                msg = await channel.fetch_message(PANEL_MESSAGE_ID)
-                await msg.edit(view=Panel())
-                print(f"✅ Embed existente conectado con View correctamente ({channel.guild.name})")
-            except Exception as e:
-                import traceback
-                print("❌ Error conectando embed existente:")
-                traceback.print_exc()
-
-        bot.loop.create_task(attach_view())
-
-        # 4️⃣ Conectar al gateway
-        await bot.connect()
-
-    asyncio.run(main())
+bot.run(TOKEN)
