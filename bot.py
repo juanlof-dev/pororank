@@ -139,7 +139,6 @@ class VerifyIconView(View):
     @discord.ui.button(label="He cambiado el icono", style=discord.ButtonStyle.success, custom_id="verify_icon")
     async def verify(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
-
         if str(interaction.user.id) != self.user_id:
             return await interaction.followup.send("❌ Esta verificación no es tuya.", ephemeral=True)
 
@@ -197,12 +196,10 @@ class AccountActionsView(View):
         await interaction.response.defer(ephemeral=True)
         data = load_data()
         accs = data[self.owner_id]
-
         for a in accs:
             a["primary"] = False
         accs[self.index]["primary"] = True
         save_data(data)
-
         acc = accs[self.index]
         await apply_roles(interaction.user, acc["region"], acc["solo"], acc["flex"])
         summoner = await get_summoner_by_puuid(acc["puuid"], acc["region"])
@@ -216,13 +213,11 @@ class AccountActionsView(View):
         data = load_data()
         accs = data[self.owner_id]
         removed = accs.pop(self.index)
-
         if accs:
             accs[0]["primary"] = True
             await apply_roles(interaction.user, accs[0]["region"], accs[0]["solo"], accs[0]["flex"])
         else:
             await clear_roles(interaction.user)
-
         save_data(data)
         await interaction.followup.send(f"🗑️ Cuenta **{removed['riot_id']}** eliminada.", ephemeral=True)
 
@@ -303,22 +298,20 @@ class Panel(View):
 
         await interaction.followup.send("🔄 Datos actualizados correctamente.", ephemeral=True)
 
-# ------------------ TASK AUTOMÁTICA DE RANKS ------------------
+# ------------------ REFRESCO AUTOMÁTICO DE RANGOS ------------------
 
 @tasks.loop(hours=12)
 async def update_ranks_loop():
     print("🔄 Actualizando ranks de todos los usuarios...")
     data = load_data()
-
     for uid, accounts in data.items():
         primary_acc = next((a for a in accounts if a["primary"]), None)
         if not primary_acc:
             continue
 
         solo, flex = await get_ranks(primary_acc["puuid"], primary_acc["region"])
-
         if solo == primary_acc["solo"] and flex == primary_acc["flex"]:
-            print(f"[RANKS] {uid} sin cambios, no se tocarán roles")
+            print(f"[RANKS] {uid} sin cambios")
             continue
 
         print(f"[RANKS] {uid}: {primary_acc['solo']}/{primary_acc['flex']} → {solo}/{flex}")
@@ -332,8 +325,30 @@ async def update_ranks_loop():
                 await apply_roles(member, primary_acc["region"], solo, flex)
 
         await asyncio.sleep(0.5)
-
     print("✅ Ranks actualizados correctamente.")
+
+# ------------------ FUNCION DEPLOY PANEL ------------------
+
+async def deploy_panel():
+    channel = bot.get_channel(PANEL_CHANNEL_ID)
+    if not channel:
+        print(f"❌ No se encontró el canal con ID {PANEL_CHANNEL_ID}")
+        return
+    await channel.purge(limit=5)
+    embed = discord.Embed(
+        title="🎮 Vinculación de Cuentas LoL",
+        description=(
+            "Gestiona tus cuentas de **League of Legends**, roles y rangos directamente desde este panel.\n\n"
+            "🔹 **Vincular cuenta:** Añade tu cuenta de LoL\n"
+            "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
+            "🔹 **Actualizar datos:** Refresca tu rango automáticamente"
+        ),
+        color=0x9146FF
+    )
+    embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png")
+    embed.set_footer(text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!",
+                     icon_url=bot.user.display_avatar.url)
+    await channel.send(embed=embed, view=Panel())
 
 # ------------------ READY ------------------
 
