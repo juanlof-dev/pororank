@@ -185,14 +185,23 @@ class VerifyIconView(View):
         )
 
 class AccountActionsView(View):
-    def __init__(self, owner_id, index):
+    def __init__(self, owner_id, index, is_primary: bool):
         super().__init__(timeout=None)
         self.owner_id = owner_id
         self.index = index
 
-    async def interaction_check(self, interaction):
+        # Deshabilitar botón si ya es principal
+        if is_primary:
+            self.primary.disabled = True
+            self.primary.label = "Cuenta principal"
+            self.primary.style = discord.ButtonStyle.secondary
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if str(interaction.user.id) != self.owner_id:
-            await interaction.response.send_message("❌ No puedes usar estos botones.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ No puedes usar estos botones.",
+                ephemeral=True
+            )
             return False
         return True
 
@@ -210,14 +219,23 @@ class AccountActionsView(View):
         accs[self.index]["primary"] = True
         save_data(data)
 
+        acc = accs[self.index]
+
         await apply_roles(
             interaction.user,
-            accs[self.index]["region"],
-            accs[self.index]["solo"],
-            accs[self.index]["flex"]
+            acc["region"],
+            acc["solo"],
+            acc["flex"]
         )
 
-        await interaction.response.send_message("⭐ Cuenta marcada como principal.", ephemeral=True)
+        summoner = await get_summoner_by_puuid(acc["puuid"], acc["region"])
+        embed = build_account_embed(acc, summoner)
+
+        await interaction.response.send_message(
+            f"✅ Has marcado **{acc['riot_id']}** como tu cuenta principal",
+            embed=embed,
+            ephemeral=True
+        )
 
     @discord.ui.button(
         label="Eliminar",
@@ -227,6 +245,7 @@ class AccountActionsView(View):
     async def delete(self, interaction, _):
         data = load_data()
         accs = data[self.owner_id]
+
         removed = accs.pop(self.index)
 
         if accs:
@@ -314,12 +333,15 @@ class Panel(View):
     @discord.ui.button(
         label="Ver cuentas",
         style=discord.ButtonStyle.secondary,
-        custom_id="panel_view"
+        custom_id="panel_view_accounts"
     )
-    async def view(self, interaction, _):
+    async def view_accounts(self, interaction, _):
         data = load_data().get(str(interaction.user.id), [])
         if not data:
-            await interaction.response.send_message("No tienes cuentas vinculadas.", ephemeral=True)
+            await interaction.response.send_message(
+                "No tienes cuentas vinculadas.",
+                ephemeral=True
+            )
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -327,13 +349,53 @@ class Panel(View):
         for idx, acc in enumerate(data):
             summoner = await get_summoner_by_puuid(acc["puuid"], acc["region"])
             embed = build_account_embed(acc, summoner)
-            view = AccountActionsView(str(interaction.user.id), idx)
+
+            view = AccountActionsView(
+                owner_id=str(interaction.user.id),
+                index=idx,
+                is_primary=acc["primary"]
+            )
 
             await interaction.followup.send(
                 embed=embed,
                 view=view,
                 ephemeral=True
             )
+
+    @discord.ui.button(
+        label="Actualizar datos",
+        style=discord.ButtonStyle.success,
+        custom_id="panel_refresh"
+    )
+    async def refresh(self, interaction, _):
+        data = load_data()
+        uid = str(interaction.user.id)
+
+        if uid not in data:
+            await interaction.response.send_message(
+                "No tienes cuenta principal.",
+                ephemeral=True
+            )
+            return
+
+        primary = next(a for a in data[uid] if a["primary"])
+        solo, flex = await get_ranks(primary["puuid"], primary["region"])
+
+        primary["solo"] = solo
+        primary["flex"] = flex
+        save_data(data)
+
+        await apply_roles(
+            interaction.user,
+            primary["region"],
+            solo,
+            flex
+        )
+
+        await interaction.response.send_message(
+            "🔄 Datos actualizados correctamente.",
+            ephemeral=True
+        )
 
 # ------------------ DEPLOY PANEL ------------------
 
@@ -374,3 +436,4 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
