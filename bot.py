@@ -173,14 +173,16 @@ class VerifyIconView(View):
         custom_id="verify_icon"
     )
     async def verify(self, interaction, _):
+        await interaction.response.defer(ephemeral=True)
+
         if str(interaction.user.id) != self.user_id:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ Esta verificación no es tuya.", ephemeral=True
             )
 
         pending = PENDING_VERIFICATIONS.get(self.user_id)
         if not pending:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "⏰ Verificación expirada.", ephemeral=True
             )
 
@@ -189,7 +191,7 @@ class VerifyIconView(View):
         )
 
         if summoner["profileIconId"] != VERIFICATION_ICON_ID:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ El icono no coincide.", ephemeral=True
             )
 
@@ -218,7 +220,7 @@ class VerifyIconView(View):
         await apply_roles(interaction.user, acc["region"], solo, flex)
         del PENDING_VERIFICATIONS[self.user_id]
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "✅ Cuenta vinculada correctamente",
             embed=build_account_embed(acc, summoner),
             ephemeral=True
@@ -236,11 +238,13 @@ class Panel(View):
         custom_id="panel_refresh"
     )
     async def refresh(self, interaction, _):
+        await interaction.response.defer(ephemeral=True)
+
         data = load_data()
         uid = str(interaction.user.id)
 
         if uid not in data:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "No tienes cuenta principal.", ephemeral=True
             )
 
@@ -250,7 +254,7 @@ class Panel(View):
         )
 
         if solo == primary["solo"] and flex == primary["flex"]:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "ℹ️ No hubo cambios de rango.", ephemeral=True
             )
 
@@ -265,7 +269,7 @@ class Panel(View):
             flex
         )
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "🔄 Datos actualizados correctamente.",
             ephemeral=True
         )
