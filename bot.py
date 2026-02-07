@@ -410,6 +410,31 @@ async def deploy_panel():
     )
     await channel.send(embed=embed, view=Panel())
 
+# ------------------ TAREA AUTOMÁTICA DE RANKS ------------------
+
+@tasks.loop(hours=3)
+async def update_ranks_loop():
+    print("🔄 Actualizando ranks de todos los usuarios...")
+    data = load_data()
+    for uid, accounts in data.items():
+        # Buscar la cuenta principal
+        primary_acc = next((a for a in accounts if a["primary"]), None)
+        if not primary_acc:
+            continue
+
+        solo, flex = await get_ranks(primary_acc["puuid"], primary_acc["region"])
+        primary_acc["solo"] = solo
+        primary_acc["flex"] = flex
+        save_data(data)
+
+        # Aplicar roles si el usuario está en algún servidor donde el bot pueda
+        for guild in bot.guilds:
+            member = guild.get_member(int(uid))
+            if member:
+                await apply_roles(member, primary_acc["region"], solo, flex)
+
+    print("✅ Ranks actualizados correctamente.")
+
 # ------------------ READY ------------------
 
 @bot.event
@@ -418,6 +443,10 @@ async def on_ready():
     bot.add_view(Panel())
     bot.add_view(AccountActionsView("0", 0))
     await deploy_panel()
+
+    # <--- Inicia la tarea automática de actualización de ranks
+    update_ranks_loop.start()
+
     print("Bot listo")
 
 # ------------------ WEB SERVER ------------------
@@ -436,4 +465,5 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
