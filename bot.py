@@ -1,9 +1,11 @@
-import discord, aiohttp, os
+import discord
+import aiohttp
+import os
+import threading
+from urllib.parse import quote
 from discord.ext import commands, tasks
 from discord.ui import View, Modal, TextInput, Select
-from urllib.parse import quote
 from flask import Flask
-import threading
 
 from config import *
 from database import load_data, save_data, init_db
@@ -17,7 +19,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ------------------ VERIFICACIÓN ------------------
 
 PENDING_VERIFICATIONS = {}
-VERIFICATION_ICON_ID = 29  # cambia este ID si quieres otro icono
+VERIFICATION_ICON_ID = 29  # icono que debe ponerse el usuario
 
 # ------------------ RIOT API ------------------
 
@@ -33,7 +35,8 @@ async def riot_get(url):
 async def validate_riot_id(name, tag, region):
     _, routing, _ = REGIONS[region]
     return await riot_get(
-        f"https://{routing}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{quote(name)}/{quote(tag)}"
+        f"https://{routing}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/"
+        f"{quote(name)}/{quote(tag)}"
     )
 
 async def get_summoner_by_puuid(puuid, region):
@@ -47,6 +50,7 @@ async def get_ranks(puuid, region):
     data = await riot_get(
         f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
     )
+
     solo = flex = "UNRANKED"
     if data:
         for q in data:
@@ -87,42 +91,58 @@ def verification_embed(name, tag):
         color=0xF1C40F
     )
     embed.set_thumbnail(
-        url=f"https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/profile-icons/{VERIFICATION_ICON_ID}.jpg"
+        url=f"https://raw.communitydragon.org/latest/plugins/"
+            f"rcp-be-lol-game-data/global/default/v1/profile-icons/{VERIFICATION_ICON_ID}.jpg"
     )
     return embed
 
-def build_account_embed(riot_id, summoner, region, solo, flex):
+def build_account_embed(acc, summoner):
     icon_url = (
-        f"https://raw.communitydragon.org/latest/plugins/"
-        f"rcp-be-lol-game-data/global/default/v1/profile-icons/{summoner['profileIconId']}.jpg"
+        "https://raw.communitydragon.org/latest/plugins/"
+        "rcp-be-lol-game-data/global/default/v1/profile-icons/"
+        f"{summoner['profileIconId']}.jpg"
     )
 
-    embed = discord.Embed(title="🎮 Cuenta de League of Legends", color=0x2ECC71)
+    title = f"{'⭐ ' if acc['primary'] else ''}{acc['riot_id']} ({acc['region']})"
+
+    embed = discord.Embed(
+        title=title,
+        color=0x2B2D31
+    )
     embed.set_thumbnail(url=icon_url)
 
-    embed.add_field(name="Nombre de invocador", value=f"{riot_id} ({region})", inline=True)
-    embed.add_field(name="Nivel", value=summoner["summonerLevel"], inline=True)
-    embed.add_field(name="Clasificación Solo/Duo", value=solo, inline=False)
-    embed.add_field(name="Clasificación Flexible", value=flex, inline=False)
+    embed.add_field(
+        name="",
+        value=f"**Lvl {summoner['summonerLevel']}**",
+        inline=False
+    )
+    embed.add_field(
+        name="",
+        value=f"SoloQ: **{acc['solo']}**    FlexQ: **{acc['flex']}**",
+        inline=False
+    )
 
+    embed.set_footer(text="Solo tú puedes verlo • Eliminar este mensaje")
     return embed
 
-# ------------------ VERIFICACIÓN VIEW ------------------
+# ------------------ VIEWS ------------------
 
 class VerifyIconView(View):
     def __init__(self, user_id):
         super().__init__(timeout=300)
         self.user_id = user_id
 
-    @discord.ui.button(label="He cambiado el icono", style=discord.ButtonStyle.success)
+    @discord.ui.button(
+        label="He cambiado el icono",
+        style=discord.ButtonStyle.success,
+        custom_id="verify_icon"
+    )
     async def verify(self, interaction, _):
-        uid = str(interaction.user.id)
-
-        if uid != self.user_id:
+        if str(interaction.user.id) != self.user_id:
             await interaction.response.send_message("❌ Esta verificación no es tuya.", ephemeral=True)
             return
 
-        pending = PENDING_VERIFICATIONS.get(uid)
+        pending = PENDING_VERIFICATIONS.get(self.user_id)
         if not pending:
             await interaction.response.send_message("⏰ Verificación expirada.", ephemeral=True)
             return
@@ -137,36 +157,93 @@ class VerifyIconView(View):
 
         solo, flex = await get_ranks(pending["puuid"], pending["region"])
         data = load_data()
-        data.setdefault(uid, [])
+        data.setdefault(self.user_id, [])
 
-        for a in data[uid]:
+        for a in data[self.user_id]:
             a["primary"] = False
 
-        data[uid].append({
+        acc = {
             "riot_id": pending["riot_id"],
             "puuid": pending["puuid"],
             "region": pending["region"],
             "solo": solo,
             "flex": flex,
             "primary": True
-        })
+        }
 
+        data[self.user_id].append(acc)
         save_data(data)
-        await apply_roles(interaction.user, pending["region"], solo, flex)
+        await apply_roles(interaction.user, acc["region"], solo, flex)
 
-        embed = build_account_embed(
-            pending["riot_id"],
-            summoner,
-            pending["region"],
-            solo,
-            flex
-        )
-
-        del PENDING_VERIFICATIONS[uid]
+        embed = build_account_embed(acc, summoner)
+        del PENDING_VERIFICATIONS[self.user_id]
 
         await interaction.response.send_message(
             "✅ **Cuenta vinculada correctamente**",
             embed=embed,
+            ephemeral=True
+        )
+
+class AccountActionsView(View):
+    def __init__(self, owner_id, index):
+        super().__init__(timeout=None)
+        self.owner_id = owner_id
+        self.index = index
+
+    async def interaction_check(self, interaction):
+        if str(interaction.user.id) != self.owner_id:
+            await interaction.response.send_message("❌ No puedes usar estos botones.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Marcar principal",
+        style=discord.ButtonStyle.success,
+        custom_id="account_primary"
+    )
+    async def primary(self, interaction, _):
+        data = load_data()
+        accs = data[self.owner_id]
+
+        for a in accs:
+            a["primary"] = False
+        accs[self.index]["primary"] = True
+        save_data(data)
+
+        await apply_roles(
+            interaction.user,
+            accs[self.index]["region"],
+            accs[self.index]["solo"],
+            accs[self.index]["flex"]
+        )
+
+        await interaction.response.send_message("⭐ Cuenta marcada como principal.", ephemeral=True)
+
+    @discord.ui.button(
+        label="Eliminar",
+        style=discord.ButtonStyle.danger,
+        custom_id="account_delete"
+    )
+    async def delete(self, interaction, _):
+        data = load_data()
+        accs = data[self.owner_id]
+        removed = accs.pop(self.index)
+
+        if accs:
+            accs[0]["primary"] = True
+            await apply_roles(
+                interaction.user,
+                accs[0]["region"],
+                accs[0]["solo"],
+                accs[0]["flex"]
+            )
+        else:
+            await clear_roles(interaction.user)
+
+        save_data(data)
+
+        await interaction.response.send_message(
+            f"🗑️ Cuenta **{removed['riot_id']}** eliminada.",
             ephemeral=True
         )
 
@@ -226,27 +303,37 @@ class Panel(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Vincular cuenta", style=discord.ButtonStyle.primary)
+    @discord.ui.button(
+        label="Vincular cuenta",
+        style=discord.ButtonStyle.primary,
+        custom_id="panel_link"
+    )
     async def link(self, interaction, _):
         await interaction.response.send_modal(LinkModal())
 
-    @discord.ui.button(label="Ver cuentas", style=discord.ButtonStyle.secondary)
-    async def view_accounts(self, interaction, _):
+    @discord.ui.button(
+        label="Ver cuentas",
+        style=discord.ButtonStyle.secondary,
+        custom_id="panel_view"
+    )
+    async def view(self, interaction, _):
         data = load_data().get(str(interaction.user.id), [])
         if not data:
             await interaction.response.send_message("No tienes cuentas vinculadas.", ephemeral=True)
             return
 
-        for acc in data:
+        await interaction.response.defer(ephemeral=True)
+
+        for idx, acc in enumerate(data):
             summoner = await get_summoner_by_puuid(acc["puuid"], acc["region"])
-            embed = build_account_embed(
-                acc["riot_id"],
-                summoner,
-                acc["region"],
-                acc["solo"],
-                acc["flex"]
+            embed = build_account_embed(acc, summoner)
+            view = AccountActionsView(str(interaction.user.id), idx)
+
+            await interaction.followup.send(
+                embed=embed,
+                view=view,
+                ephemeral=True
             )
-            await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ------------------ DEPLOY PANEL ------------------
 
@@ -256,10 +343,9 @@ async def deploy_panel():
 
     embed = discord.Embed(
         title="🎮 Vinculación de Cuentas LoL",
-        description="Gestiona tus cuentas de League of Legends desde aquí.",
+        description="Gestiona tus cuentas de League of Legends desde este panel.",
         color=0x9146FF
     )
-
     await channel.send(embed=embed, view=Panel())
 
 # ------------------ READY ------------------
@@ -268,6 +354,7 @@ async def deploy_panel():
 async def on_ready():
     init_db()
     bot.add_view(Panel())
+    bot.add_view(AccountActionsView("0", 0))
     await deploy_panel()
     print("Bot listo")
 
