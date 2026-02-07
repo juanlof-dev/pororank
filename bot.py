@@ -402,14 +402,27 @@ class Panel(View):
 
 async def deploy_panel():
     channel = bot.get_channel(PANEL_CHANNEL_ID)
+    if not channel:
+        return
+
     await channel.purge(limit=5)
 
     embed = discord.Embed(
         title="🎮 Vinculación de Cuentas LoL",
-        description="Gestiona tus cuentas de League of Legends desde este panel.",
+        description=(
+            "Gestiona tus cuentas de **League of Legends**, roles y rangos directamente desde este panel.\n\n"
+            "🔹 **Vincular cuenta:** Añade tu cuenta de LoL\n"
+            "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
+            "🔹 **Actualizar datos:** Refresca tu rango automáticamente"
+        ),
         color=0x9146FF
     )
+
+    embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png")
+    embed.set_footer(text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!", icon_url=bot.user.display_avatar.url)
+
     await channel.send(embed=embed, view=Panel())
+
 
 # ------------------ TAREA AUTOMÁTICA DE RANKS ------------------
 
@@ -469,6 +482,7 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
 
