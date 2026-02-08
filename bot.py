@@ -247,15 +247,42 @@ class RegionView(View):
         self.add_item(RegionDropdown(name, tag))
 
 class LinkModal(Modal, title="Vincular cuenta LoL"):
-    riot = TextInput(label="Riot ID (Nombre#TAG)")
+    name = TextInput(
+        label="Nombre de invocador",
+        placeholder="Ej: XOKAS THE KING",
+        max_length=16
+    )
 
-    async def on_submit(self, interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            name, tag = self.riot.value.strip().split("#")
-        except ValueError:
-            return await interaction.followup.send("❌ Formato incorrecto.", ephemeral=True)
-        await interaction.followup.send("Selecciona la región:", view=RegionView(name, tag), ephemeral=True)
+    tag = TextInput(
+        label="TAG",
+        placeholder="KEKY",
+        max_length=5
+    )
+
+async def on_submit(self, interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    name = self.name.value.strip()
+    tag = self.tag.value.strip()
+
+    if "#" in name or "#" in tag:
+        return await interaction.followup.send(
+            "❌ No incluyas el carácter **#**.\n"
+            "👉 Escríbelo separado: **Nombre** y **TAG**.",
+            ephemeral=True
+        )
+
+    if not name or not tag:
+        return await interaction.followup.send(
+            "❌ Debes rellenar ambos campos.",
+            ephemeral=True
+        )
+
+    await interaction.followup.send(
+        "Selecciona la región:",
+        view=RegionView(name, tag),
+        ephemeral=True
+    )
 
 # ------------------ PANEL ------------------
 
@@ -377,3 +404,4 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
