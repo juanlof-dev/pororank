@@ -246,43 +246,49 @@ class RegionView(View):
         super().__init__()
         self.add_item(RegionDropdown(name, tag))
 
-class LinkModal(Modal, title="Vincular cuenta LoL"):
-    name = TextInput(
-        label="Nombre de invocador",
-        placeholder="Ej: XOKAS THE KING",
-        max_length=16
-    )
+class LinkModal(Modal):
+    def __init__(self):
+        super().__init__(title="Vincular cuenta LoL")
 
-    tag = TextInput(
-        label="TAG",
-        placeholder="KEKY",
-        max_length=5
-    )
-
-async def on_submit(self, interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    name = self.name.value.strip()
-    tag = self.tag.value.strip()
-
-    if "#" in name or "#" in tag:
-        return await interaction.followup.send(
-            "❌ No incluyas el carácter **#**.\n"
-            "👉 Escríbelo separado: **Nombre** y **TAG**.",
-            ephemeral=True
+        self.name = TextInput(
+            label="Nombre de invocador",
+            placeholder="Ej: Faker",
+            max_length=16
         )
 
-    if not name or not tag:
-        return await interaction.followup.send(
-            "❌ Debes rellenar ambos campos.",
-            ephemeral=True
+        self.tag = TextInput(
+            label="TAG",
+            placeholder="EUW",
+            max_length=5
         )
 
-    await interaction.followup.send(
-        "Selecciona la región:",
-        view=RegionView(name, tag),
-        ephemeral=True
-    )
+        self.add_item(self.name)
+        self.add_item(self.tag)
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        name = self.name.value.strip()
+        tag = self.tag.value.strip().upper()
+
+        if "#" in name or "#" in tag:
+            return await interaction.followup.send(
+                "❌ No incluyas el carácter **#**.\n"
+                "👉 Escríbelo separado: **Nombre** y **TAG**.",
+                ephemeral=True
+            )
+
+        if not name or not tag:
+            return await interaction.followup.send(
+                "❌ Debes rellenar ambos campos.",
+                ephemeral=True
+            )
+
+        await interaction.followup.send(
+            "Selecciona la región:",
+            view=RegionView(name, tag),
+            ephemeral=True
+        )
 
 # ------------------ PANEL ------------------
 
@@ -404,4 +410,5 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
