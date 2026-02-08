@@ -252,13 +252,13 @@ class LinkModal(Modal):
 
         self.name = TextInput(
             label="Nombre de invocador",
-            placeholder="Ej: Faker",
+            placeholder="Ej: XOKAS THE KING",
             max_length=16
         )
 
         self.tag = TextInput(
             label="TAG",
-            placeholder="EUW",
+            placeholder="KEKY",
             max_length=5
         )
 
@@ -410,5 +410,6 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
