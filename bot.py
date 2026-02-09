@@ -236,9 +236,11 @@ async def duo(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     init_db()
-    await bot.tree.sync()
-    print("Bot listo")
+    guild = discord.Object(id=1409202667112370191)  # reemplaza con el ID de tu servidor
+    await bot.tree.sync(guild=guild)
+    print("Bot listo y comandos sincronizados para tu servidor")
 
 # ================== START ==================
 
 bot.run(TOKEN)
+
