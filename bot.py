@@ -384,10 +384,21 @@ async def deploy_panel():
     await channel.send(embed=embed, view=Panel())
 
 # ------------------ READY ------------------
-
 @bot.event
 async def on_ready():
     init_db()
+
+    # -------------------- ELIMINAR /duo --------------------
+    print("🔄 Revisando comandos antiguos...")
+    # Borra el comando "duo" de todos los servidores donde esté registrado
+    for guild in bot.guilds:
+        commands_in_guild = await bot.tree.fetch_commands(guild=guild)
+        for cmd in commands_in_guild:
+            if cmd.name == "duo":
+                await cmd.delete()
+                print(f"✅ Comando /duo eliminado en {guild.name} ({guild.id})")
+
+    # -------------------- VISTA PANEL --------------------
     bot.add_view(Panel())
     bot.add_view(AccountActionsView("0", 0, False))
     await deploy_panel()
@@ -410,5 +421,6 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
