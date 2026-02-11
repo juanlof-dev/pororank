@@ -388,22 +388,31 @@ async def deploy_panel():
 async def on_ready():
     init_db()
 
-    # -------------------- ELIMINAR /duo --------------------
-    print("🔄 Revisando comandos antiguos...")
-    # Borra el comando "duo" de todos los servidores donde esté registrado
+    print("🔄 Limpiando comandos slash...")
+
+    # ---------- BORRAR COMANDOS GLOBALES ----------
+    global_cmds = await bot.tree.fetch_commands()
+    for cmd in global_cmds:
+        if cmd.name == "duo":
+            await cmd.delete()
+            print("✅ /duo eliminado GLOBALMENTE")
+
+    # ---------- BORRAR COMANDOS POR SERVIDOR ----------
     for guild in bot.guilds:
-        commands_in_guild = await bot.tree.fetch_commands(guild=guild)
-        for cmd in commands_in_guild:
+        guild_cmds = await bot.tree.fetch_commands(guild=guild)
+        for cmd in guild_cmds:
             if cmd.name == "duo":
                 await cmd.delete()
-                print(f"✅ Comando /duo eliminado en {guild.name} ({guild.id})")
+                print(f"✅ /duo eliminado en {guild.name}")
 
-    # -------------------- VISTA PANEL --------------------
+    # ---------- VISTAS PERSISTENTES ----------
     bot.add_view(Panel())
     bot.add_view(AccountActionsView("0", 0, False))
+
     await deploy_panel()
     update_ranks_loop.start()
-    print("Bot listo")
+
+    print("🤖 Bot listo")
 
 # ------------------ WEB SERVER ------------------
 
@@ -421,6 +430,7 @@ threading.Thread(target=run_flask).start()
 # ------------------ START ------------------
 
 bot.run(TOKEN)
+
 
 
 
