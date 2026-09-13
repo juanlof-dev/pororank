@@ -36,6 +36,7 @@ async def riot_get(url):
 
     async with aiohttp.ClientSession() as s:
         async with s.get(url, headers=headers) as r:
+
             if r.status != 200:
                 print("Riot API error:", r.status, url)
                 return None
@@ -44,6 +45,7 @@ async def riot_get(url):
 
 
 async def validate_riot_id(name, tag, region):
+
     _, routing, _ = REGIONS[region]
 
     return await riot_get(
@@ -53,6 +55,7 @@ async def validate_riot_id(name, tag, region):
 
 
 async def get_summoner_by_puuid(puuid, region):
+
     platform, _, _ = REGIONS[region]
 
     return await riot_get(
@@ -61,6 +64,7 @@ async def get_summoner_by_puuid(puuid, region):
 
 
 async def get_ranks(puuid, region):
+
     platform, _, _ = REGIONS[region]
 
     data = await riot_get(
@@ -70,7 +74,9 @@ async def get_ranks(puuid, region):
     solo = flex = "UNRANKED"
 
     if data:
+
         for q in data:
+
             if q["queueType"] == "RANKED_SOLO_5x5":
                 solo = q["tier"]
 
@@ -83,13 +89,23 @@ async def get_ranks(puuid, region):
 # ------------------ ROLES (IDEMPOTENTES) ------------------
 
 def get_desired_roles(member, region, solo, flex):
+
     roles = []
 
-    region_role = member.guild.get_role(REGIONS[region][2])
-    solo_role = member.guild.get_role(SOLO_ROLES[solo])
-    flex_role = member.guild.get_role(FLEX_ROLES[flex])
+    region_role = member.guild.get_role(
+        REGIONS[region][2]
+    )
+
+    solo_role = member.guild.get_role(
+        SOLO_ROLES[solo]
+    )
+
+    flex_role = member.guild.get_role(
+        FLEX_ROLES[flex]
+    )
 
     for r in (region_role, solo_role, flex_role):
+
         if r:
             roles.append(r)
 
@@ -97,6 +113,7 @@ def get_desired_roles(member, region, solo, flex):
 
 
 async def apply_roles(member, region, solo, flex):
+
     desired = get_desired_roles(
         member,
         region,
@@ -118,11 +135,15 @@ async def apply_roles(member, region, solo, flex):
     to_add = desired - current
     to_remove = current - desired
 
+    # Si ya tiene exactamente los roles que corresponden,
+    # no hacemos absolutamente nada.
     if not to_add and not to_remove:
+
         print(
             f"[ROLES] {member} sin cambios, "
             f"roles ya correctos"
         )
+
         return
 
     print(
@@ -132,13 +153,20 @@ async def apply_roles(member, region, solo, flex):
     )
 
     if to_remove:
-        await member.remove_roles(*to_remove)
+
+        await member.remove_roles(
+            *to_remove
+        )
 
     if to_add:
-        await member.add_roles(*to_add)
+
+        await member.add_roles(
+            *to_add
+        )
 
 
 async def clear_roles(member):
+
     managed_ids = (
         list(SOLO_ROLES.values())
         + list(FLEX_ROLES.values())
@@ -151,20 +179,26 @@ async def clear_roles(member):
     ]
 
     if roles:
-        await member.remove_roles(*roles)
+
+        await member.remove_roles(
+            *roles
+        )
 
 
 # ------------------ SINCRONIZACIÓN AUTOMÁTICA DE ROLES ------------------
 
 async def sync_member_roles(member):
+
     """
     Busca las cuentas guardadas del usuario y aplica
     automáticamente los roles de su cuenta principal.
 
+    IMPORTANTE:
+    Esta función NO consulta Riot.
+
     Se utiliza:
     - Cuando entra un usuario al servidor.
-    - Al iniciar el bot para sincronizar usuarios que
-      ya estaban dentro.
+    - Al iniciar/reiniciar el bot.
     """
 
     uid = str(member.id)
@@ -172,22 +206,29 @@ async def sync_member_roles(member):
     data = load_data()
 
     if uid not in data:
+
         print(
             f"[SYNC] {member} no tiene cuentas vinculadas."
         )
+
         return
 
     accounts = data[uid]
 
     primary = next(
-        (a for a in accounts if a["primary"]),
+        (
+            a for a in accounts
+            if a["primary"]
+        ),
         None
     )
 
     if not primary:
+
         print(
             f"[SYNC] {member} no tiene cuenta principal."
         )
+
         return
 
     print(
@@ -195,35 +236,26 @@ async def sync_member_roles(member):
         f"en {member.guild.name}"
     )
 
-    solo, flex = await get_ranks(
-        primary["puuid"],
-        primary["region"]
+    print(
+        f"[SYNC] Datos guardados: "
+        f"SoloQ={primary['solo']} "
+        f"FlexQ={primary['flex']}"
     )
 
-    # Guardamos los rangos actuales si han cambiado
-    if (
-        solo != primary["solo"]
-        or flex != primary["flex"]
-    ):
-        print(
-            f"[SYNC] {member}: "
-            f"{primary['solo']}/{primary['flex']} "
-            f"→ {solo}/{flex}"
-        )
+    # NO CONSULTAMOS RIOT AQUÍ.
+    #
+    # Usamos directamente los rangos almacenados
+    # en la base de datos.
+    #
+    # apply_roles() comprueba primero si los roles
+    # ya son correctos. Si lo son, no hace ninguna
+    # llamada para añadir/quitar roles.
 
-        primary["solo"] = solo
-        primary["flex"] = flex
-
-        save_data(data)
-
-    # IMPORTANTE:
-    # Los roles se aplican SIEMPRE, incluso si el rango
-    # no ha cambiado.
     await apply_roles(
         member,
         primary["region"],
-        solo,
-        flex
+        primary["solo"],
+        primary["flex"]
     )
 
     print(
@@ -234,6 +266,7 @@ async def sync_member_roles(member):
 # ------------------ EMBEDS ------------------
 
 def verification_embed(name, tag):
+
     embed = discord.Embed(
         title="🔐 Verificación de propiedad",
         description=(
@@ -258,6 +291,7 @@ def verification_embed(name, tag):
 
 
 def build_account_embed(acc, summoner):
+
     icon_url = (
         "https://raw.communitydragon.org/latest/plugins/"
         "rcp-be-lol-game-data/global/default/v1/profile-icons/"
@@ -274,7 +308,9 @@ def build_account_embed(acc, summoner):
         color=0x2B2D31
     )
 
-    embed.set_thumbnail(url=icon_url)
+    embed.set_thumbnail(
+        url=icon_url
+    )
 
     embed.add_field(
         name="",
@@ -303,8 +339,11 @@ def build_account_embed(acc, summoner):
 class VerifyIconView(View):
 
     def __init__(self, user_id):
+
         super().__init__(timeout=300)
+
         self.user_id = user_id
+
 
     @discord.ui.button(
         label="He cambiado el icono",
@@ -312,17 +351,24 @@ class VerifyIconView(View):
         custom_id="verify_icon"
     )
     async def verify(self, interaction, _):
-        await interaction.response.defer(ephemeral=True)
+
+        await interaction.response.defer(
+            ephemeral=True
+        )
 
         if str(interaction.user.id) != self.user_id:
+
             return await interaction.followup.send(
                 "❌ Esta verificación no es tuya.",
                 ephemeral=True
             )
 
-        pending = PENDING_VERIFICATIONS.get(self.user_id)
+        pending = PENDING_VERIFICATIONS.get(
+            self.user_id
+        )
 
         if not pending:
+
             return await interaction.followup.send(
                 "⏰ Verificación expirada.",
                 ephemeral=True
@@ -334,16 +380,21 @@ class VerifyIconView(View):
         )
 
         if not summoner:
+
             return await interaction.followup.send(
                 "❌ No se pudieron obtener datos de Riot.",
                 ephemeral=True
             )
 
         profile_icon = int(
-            summoner.get("profileIconId", 0)
+            summoner.get(
+                "profileIconId",
+                0
+            )
         )
 
         if profile_icon != VERIFICATION_ICON_ID:
+
             return await interaction.followup.send(
                 f"❌ El icono no coincide. Debe ser "
                 f"**{VERIFICATION_ICON_ID}**, "
@@ -364,6 +415,7 @@ class VerifyIconView(View):
         )
 
         for a in data[self.user_id]:
+
             a["primary"] = False
 
         acc = {
@@ -375,7 +427,9 @@ class VerifyIconView(View):
             "primary": True
         }
 
-        data[self.user_id].append(acc)
+        data[self.user_id].append(
+            acc
+        )
 
         save_data(data)
 
@@ -386,7 +440,9 @@ class VerifyIconView(View):
             flex
         )
 
-        del PENDING_VERIFICATIONS[self.user_id]
+        del PENDING_VERIFICATIONS[
+            self.user_id
+        ]
 
         await interaction.followup.send(
             "✅ **Cuenta vinculada correctamente**",
@@ -406,15 +462,20 @@ class AccountActionsView(View):
         index,
         is_primary: bool
     ):
-        super().__init__(timeout=None)
+
+        super().__init__(
+            timeout=None
+        )
 
         self.owner_id = owner_id
         self.index = index
 
         if is_primary:
+
             self.primary.disabled = True
             self.primary.label = "Cuenta principal"
             self.primary.style = discord.ButtonStyle.secondary
+
 
     async def interaction_check(
         self,
@@ -422,13 +483,16 @@ class AccountActionsView(View):
     ) -> bool:
 
         if str(interaction.user.id) != self.owner_id:
+
             await interaction.response.send_message(
                 "❌ No puedes usar estos botones.",
                 ephemeral=True
             )
+
             return False
 
         return True
+
 
     @discord.ui.button(
         label="Marcar principal",
@@ -436,20 +500,30 @@ class AccountActionsView(View):
         custom_id="account_primary"
     )
     async def primary(self, interaction, _):
-        await interaction.response.defer(ephemeral=True)
+
+        await interaction.response.defer(
+            ephemeral=True
+        )
 
         data = load_data()
 
-        accs = data[self.owner_id]
+        accs = data[
+            self.owner_id
+        ]
 
         for a in accs:
+
             a["primary"] = False
 
-        accs[self.index]["primary"] = True
+        accs[
+            self.index
+        ]["primary"] = True
 
         save_data(data)
 
-        acc = accs[self.index]
+        acc = accs[
+            self.index
+        ]
 
         await apply_roles(
             interaction.user,
@@ -475,21 +549,30 @@ class AccountActionsView(View):
             ephemeral=True
         )
 
+
     @discord.ui.button(
         label="Eliminar",
         style=discord.ButtonStyle.danger,
         custom_id="account_delete"
     )
     async def delete(self, interaction, _):
-        await interaction.response.defer(ephemeral=True)
+
+        await interaction.response.defer(
+            ephemeral=True
+        )
 
         data = load_data()
 
-        accs = data[self.owner_id]
+        accs = data[
+            self.owner_id
+        ]
 
-        removed = accs.pop(self.index)
+        removed = accs.pop(
+            self.index
+        )
 
         if accs:
+
             accs[0]["primary"] = True
 
             await apply_roles(
@@ -500,6 +583,7 @@ class AccountActionsView(View):
             )
 
         else:
+
             await clear_roles(
                 interaction.user
             )
@@ -517,6 +601,7 @@ class AccountActionsView(View):
 class RegionDropdown(Select):
 
     def __init__(self, name, tag):
+
         self.name = name
         self.tag = tag
 
@@ -533,7 +618,9 @@ class RegionDropdown(Select):
             options=options
         )
 
+
     async def callback(self, interaction):
+
         await interaction.response.defer(
             ephemeral=True
         )
@@ -547,6 +634,7 @@ class RegionDropdown(Select):
         )
 
         if not acc:
+
             return await interaction.followup.send(
                 "❌ Riot ID no válido.",
                 ephemeral=True
@@ -575,16 +663,23 @@ class RegionDropdown(Select):
 class RegionView(View):
 
     def __init__(self, name, tag):
-        super().__init__()
+
+        super().__init__(
+            timeout=None
+        )
 
         self.add_item(
-            RegionDropdown(name, tag)
+            RegionDropdown(
+                name,
+                tag
+            )
         )
 
 
 class LinkModal(Modal):
 
     def __init__(self):
+
         super().__init__(
             title="Vincular cuenta LoL"
         )
@@ -601,10 +696,17 @@ class LinkModal(Modal):
             max_length=5
         )
 
-        self.add_item(self.name)
-        self.add_item(self.tag)
+        self.add_item(
+            self.name
+        )
+
+        self.add_item(
+            self.tag
+        )
+
 
     async def on_submit(self, interaction):
+
         await interaction.response.defer(
             ephemeral=True
         )
@@ -613,6 +715,7 @@ class LinkModal(Modal):
         tag = self.tag.value.strip().upper()
 
         if "#" in name or "#" in tag:
+
             return await interaction.followup.send(
                 "❌ No incluyas el carácter **#**.\n"
                 "👉 Escríbelo separado: "
@@ -621,6 +724,7 @@ class LinkModal(Modal):
             )
 
         if not name or not tag:
+
             return await interaction.followup.send(
                 "❌ Debes rellenar ambos campos.",
                 ephemeral=True
@@ -628,7 +732,10 @@ class LinkModal(Modal):
 
         await interaction.followup.send(
             "Selecciona la región:",
-            view=RegionView(name, tag),
+            view=RegionView(
+                name,
+                tag
+            ),
             ephemeral=True
         )
 
@@ -638,7 +745,11 @@ class LinkModal(Modal):
 class Panel(View):
 
     def __init__(self):
-        super().__init__(timeout=None)
+
+        super().__init__(
+            timeout=None
+        )
+
 
     @discord.ui.button(
         label="Vincular cuenta",
@@ -646,9 +757,11 @@ class Panel(View):
         custom_id="panel_link"
     )
     async def link(self, interaction, _):
+
         await interaction.response.send_modal(
             LinkModal()
         )
+
 
     @discord.ui.button(
         label="Ver cuentas",
@@ -656,6 +769,7 @@ class Panel(View):
         custom_id="panel_view_accounts"
     )
     async def view_accounts(self, interaction, _):
+
         await interaction.response.defer(
             ephemeral=True
         )
@@ -666,6 +780,7 @@ class Panel(View):
         )
 
         if not data:
+
             return await interaction.followup.send(
                 "No tienes cuentas vinculadas.",
                 ephemeral=True
@@ -684,7 +799,9 @@ class Panel(View):
             )
 
             view = AccountActionsView(
-                owner_id=str(interaction.user.id),
+                owner_id=str(
+                    interaction.user.id
+                ),
                 index=idx,
                 is_primary=acc["primary"]
             )
@@ -695,21 +812,26 @@ class Panel(View):
                 ephemeral=True
             )
 
+
     @discord.ui.button(
         label="Actualizar datos",
         style=discord.ButtonStyle.success,
         custom_id="panel_refresh"
     )
     async def refresh(self, interaction, _):
+
         await interaction.response.defer(
             ephemeral=True
         )
 
         data = load_data()
 
-        uid = str(interaction.user.id)
+        uid = str(
+            interaction.user.id
+        )
 
         if uid not in data:
+
             return await interaction.followup.send(
                 "No tienes cuenta principal.",
                 ephemeral=True
@@ -724,10 +846,15 @@ class Panel(View):
         )
 
         if not primary:
+
             return await interaction.followup.send(
                 "No tienes cuenta principal.",
                 ephemeral=True
             )
+
+        # ACTUALIZACIÓN MANUAL:
+        # Aquí sí consultamos Riot porque el usuario
+        # ha pedido expresamente actualizar sus datos.
 
         solo, flex = await get_ranks(
             primary["puuid"],
@@ -738,14 +865,18 @@ class Panel(View):
             solo != primary["solo"]
             or flex != primary["flex"]
         ):
+
             primary["solo"] = solo
             primary["flex"] = flex
 
             save_data(data)
 
-        # IMPORTANTE:
-        # Aplicar roles SIEMPRE, aunque el rango
-        # no haya cambiado.
+        # Comprobamos los roles incluso aunque
+        # el rango no haya cambiado.
+        #
+        # Si ya están correctamente asignados,
+        # apply_roles() no hace ninguna modificación.
+
         await apply_roles(
             interaction.user,
             primary["region"],
@@ -761,7 +892,7 @@ class Panel(View):
 
 # ------------------ REFRESCO AUTOMÁTICO DE RANGOS ------------------
 
-@tasks.loop(hours=12)
+@tasks.loop(hours=24)
 async def update_ranks_loop():
 
     print(
@@ -783,13 +914,24 @@ async def update_ranks_loop():
         if not primary_acc:
             continue
 
+        # Esta es la única comprobación automática
+        # que consulta Riot.
+        #
+        # Se hace cada 24 horas para detectar
+        # cambios reales de rango.
+
         solo, flex = await get_ranks(
             primary_acc["puuid"],
             primary_acc["region"]
         )
 
-        # Aunque no haya cambios en el rango,
-        # comprobamos/aplicamos los roles.
+        # Si el rango NO ha cambiado, no necesitamos
+        # modificar los datos guardados.
+        #
+        # Aun así comprobamos los roles, porque el usuario
+        # podría haberlos perdido manualmente o durante
+        # la migración.
+
         if (
             solo == primary_acc["solo"]
             and flex == primary_acc["flex"]
@@ -807,6 +949,7 @@ async def update_ranks_loop():
                 )
 
                 if member:
+
                     await apply_roles(
                         member,
                         primary_acc["region"],
@@ -834,6 +977,7 @@ async def update_ranks_loop():
             )
 
             if member:
+
                 await apply_roles(
                     member,
                     primary_acc["region"],
@@ -860,9 +1004,11 @@ async def sync_existing_members():
     data = load_data()
 
     if not data:
+
         print(
             "ℹ️ No hay usuarios en la base de datos."
         )
+
         return
 
     for guild in bot.guilds:
@@ -874,7 +1020,9 @@ async def sync_existing_members():
 
         for member in guild.members:
 
-            uid = str(member.id)
+            uid = str(
+                member.id
+            )
 
             if uid not in data:
                 continue
@@ -885,7 +1033,9 @@ async def sync_existing_members():
                     member
                 )
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(
+                    0.5
+                )
 
             except Exception as e:
 
@@ -940,7 +1090,9 @@ async def deploy_panel():
 
         return
 
-    await channel.purge(limit=5)
+    await channel.purge(
+        limit=5
+    )
 
     embed = discord.Embed(
         title="🎮 Vinculación de Cuentas LoL",
@@ -1005,6 +1157,7 @@ async def on_ready():
                 "✅ /duo eliminado GLOBALMENTE"
             )
 
+
     # ---------- BORRAR COMANDOS POR SERVIDOR ----------
 
     for guild in bot.guilds:
@@ -1024,6 +1177,7 @@ async def on_ready():
                     f"{guild.name}"
                 )
 
+
     # ---------- VISTAS PERSISTENTES ----------
 
     bot.add_view(
@@ -1040,15 +1194,23 @@ async def on_ready():
 
     await deploy_panel()
 
+
     # ---------- SINCRONIZACIÓN DE MIGRACIÓN ----------
 
     # Comprueba automáticamente los usuarios que
     # YA estaban dentro del servidor.
+    #
+    # IMPORTANTE:
+    # Esta sincronización NO consulta Riot.
+    # Utiliza los datos almacenados.
+
     await sync_existing_members()
+
 
     # ---------- REFRESCO AUTOMÁTICO ----------
 
     if not update_ranks_loop.is_running():
+
         update_ranks_loop.start()
 
     print(
@@ -1063,6 +1225,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
+
     return "Bot activo", 200
 
 
