@@ -765,10 +765,18 @@ class Panel(View):
             tier_role = channel.guild.get_role(tier_role_id) if tier_role_id else None
 
             if tier_role:
-                mention = tier_role.mention
+                # Construimos la mención directamente con el ID del rol.
+                # Así evitamos depender del nombre del rol o de su formato.
+                mention = f"<@&{tier_role.id}>"
+
+                me = channel.guild.me
+                can_mention = bool(me and me.guild_permissions.mention_everyone)
+
                 print(
                     f"[BUSCAR] {tier}: canal=#{channel.name} "
-                    f"rol={tier_role.name} ({tier_role.id}) mention={mention}"
+                    f"rol={tier_role.name} ({tier_role.id}) "
+                    f"mention={mention} mencionable={tier_role.mentionable} "
+                    f"bot_mention_everyone={can_mention}"
                 )
             else:
                 mention = ""
@@ -787,7 +795,7 @@ class Panel(View):
                     ),
                     embed=embed,
                     allowed_mentions=discord.AllowedMentions(
-                        roles=True,
+                        roles=[tier_role] if tier_role else False,
                         users=True
                     )
                 )
