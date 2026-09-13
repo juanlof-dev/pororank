@@ -71,6 +71,8 @@ async def get_ranks(puuid, region):
 
 # ------------------ ROLES ------------------
 
+UNLINKED_ROLE_ID = 1547926475657969724  # Sin vincular
+
 def get_desired_roles(member, region, solo, flex):
     roles = []
     region_role = member.guild.get_role(REGIONS[region][2])
@@ -94,8 +96,14 @@ async def apply_roles(member, region, solo, flex):
 
     current = {r for r in member.roles if r.id in managed_ids}
 
+    # Si tiene una cuenta vinculada, nunca debe conservar "Sin vincular".
+    unlinked_role = member.guild.get_role(UNLINKED_ROLE_ID)
+
     to_add = desired - current
     to_remove = current - desired
+
+    if unlinked_role and unlinked_role in member.roles:
+        to_remove.add(unlinked_role)
 
     if not to_add and not to_remove:
         print(f"[ROLES] {member} sin cambios, no se tocarán roles")
@@ -124,8 +132,25 @@ async def clear_roles(member):
 
     roles = [r for r in member.roles if r.id in managed_ids]
 
+    unlinked_role = member.guild.get_role(UNLINKED_ROLE_ID)
+
+    # Al quedarse sin cuentas, debe volver a tener "Sin vincular".
+    roles_to_add = []
+    if unlinked_role and unlinked_role not in member.roles:
+        roles_to_add.append(unlinked_role)
+
     if roles:
         await member.remove_roles(*roles)
+
+    if roles_to_add:
+        await member.add_roles(*roles_to_add)
+
+    if roles or roles_to_add:
+        print(
+            f"[ROLES] {member} sin cuentas: "
+            f"roles eliminados={[r.name for r in roles]} "
+            f"rol añadido={[r.name for r in roles_to_add]}"
+        )
 
 # ------------------ EMBEDS ------------------
 
