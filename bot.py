@@ -648,7 +648,6 @@ class Panel(View):
 
     @discord.ui.button(
         label="Buscar partida",
-        emoji="🔎",
         style=discord.ButtonStyle.primary,
         custom_id="panel_search_game"
     )
