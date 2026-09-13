@@ -736,89 +736,96 @@ class Panel(View):
             flex_display
         )
 
+        # Publicar SOLO en el canal correspondiente al rango del usuario.
+        # La ventana de búsqueda se utiliza únicamente para decidir qué
+        # roles de SoloQ deben ser mencionados.
+        target_tier = solo_tier
+        target_channel_id = TIER_CHANNELS.get(target_tier)
+
+        channel = (
+            interaction.guild.get_channel(target_channel_id)
+            if target_channel_id
+            else None
+        )
+
+        if not channel:
+            return await interaction.followup.send(
+                "❌ No se encontró el canal correspondiente a tu rango. "
+                "Revisa la configuración de TIER_CHANNELS.",
+                ephemeral=True
+            )
+
         target_tiers = TIER_SEARCH_WINDOWS.get(
             solo_tier,
             [solo_tier]
         )
 
-        sent = 0
+        tier_mentions = []
 
         for tier in target_tiers:
-            channel_id = TIER_CHANNELS.get(tier)
+            tier_role_id = SOLO_ROLES.get(tier)
 
-            channel = (
-                interaction.guild.get_channel(channel_id)
-                if channel_id
-                else None
-            )
-
-            if not channel:
+            if not tier_role_id:
                 print(
-                    f"[BUSCAR] Canal no encontrado para el tier "
-                    f"{tier} (ID {channel_id})"
+                    f"[BUSCAR] ⚠️ No hay ID de rol SoloQ configurado para {tier}"
                 )
                 continue
 
-            # El canal y el rol deben buscarse en el mismo servidor
-            # al que pertenece el canal de búsqueda.
-            tier_role_id = SOLO_ROLES.get(tier)
-            tier_role = channel.guild.get_role(tier_role_id) if tier_role_id else None
+            tier_role = interaction.guild.get_role(tier_role_id)
 
-            if tier_role:
-                # Construimos la mención directamente con el ID del rol.
-                # Así evitamos depender del nombre del rol o de su formato.
-                mention = f"<@&{tier_role.id}>"
-
-                me = channel.guild.me
-                can_mention = bool(me and me.guild_permissions.mention_everyone)
-
-                print(
-                    f"[BUSCAR] {tier}: canal=#{channel.name} "
-                    f"rol={tier_role.name} ({tier_role.id}) "
-                    f"mention={mention} mencionable={tier_role.mentionable} "
-                    f"bot_mention_everyone={can_mention}"
-                )
-            else:
-                mention = ""
+            if not tier_role:
                 print(
                     f"[BUSCAR] ⚠️ No se encontró el rol SoloQ para {tier}. "
                     f"ID configurado: {tier_role_id}. "
-                    f"Servidor del canal: {channel.guild.name} ({channel.guild.id})"
+                    f"Servidor: {interaction.guild.name} ({interaction.guild.id})"
                 )
+                continue
 
-            try:
-                await channel.send(
-                    content=(
-                        f"{mention} "
-                        f"{interaction.user.mention} "
-                        "está buscando partida"
-                    ),
-                    embed=embed,
-                    allowed_mentions=discord.AllowedMentions(
-                        roles=[tier_role] if tier_role else False,
-                        users=True
-                    )
+            mention = f"<@&{tier_role.id}>"
+            tier_mentions.append(mention)
+
+            print(
+                f"[BUSCAR] {tier}: rol={tier_role.name} "
+                f"({tier_role.id}) mention={mention} "
+                f"mencionable={tier_role.mentionable}"
+            )
+
+        content = (
+            f"{' '.join(tier_mentions)} "
+            f"{interaction.user.mention} "
+            "está buscando partida"
+        ).strip()
+
+        try:
+            await channel.send(
+                content=content,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(
+                    roles=True,
+                    users=True
                 )
+            )
 
-                sent += 1
+            sent = 1
 
-            except discord.Forbidden:
-                print(
-                    f"[BUSCAR] Sin permisos para escribir "
-                    f"en #{channel.name}"
-                )
+        except discord.Forbidden:
+            print(
+                f"[BUSCAR] Sin permisos para escribir "
+                f"en #{channel.name}"
+            )
+            sent = 0
 
         if sent == 0:
             return await interaction.followup.send(
-                "❌ No se pudo publicar el aviso en ningún canal. "
-                "Revisa la configuración de canales y los permisos del bot.",
+                "❌ No se pudo publicar el aviso en el canal de tu rango. "
+                "Revisa los permisos del bot.",
                 ephemeral=True
             )
 
         SEARCH_COOLDOWNS[uid] = now
 
         await interaction.followup.send(
-            f"✅ Aviso publicado en {sent} canal(es). "
+            f"✅ Aviso publicado en {channel.mention}. "
             "¡Suerte encontrando partida!",
             ephemeral=True
         )
@@ -911,7 +918,7 @@ async def deploy_panel():
             "🔹 **Vincular cuenta:** Añade tu cuenta de League of Legends\n"
             "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
             "🔹 **Actualizar datos:** Refresca tu rango automáticamente\n"
-            "🔸 **Buscar partida:** Avisa en los canales de tu rango que buscas partida"
+            "🔸 **Buscar partida:** Avisa en el canal de tu rango que buscas partida"
         ),
         color=0x9146FF
     )
