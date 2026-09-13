@@ -3,6 +3,7 @@ import aiohttp
 import os
 import threading
 import asyncio
+import time
 from urllib.parse import quote
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -23,6 +24,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 PENDING_VERIFICATIONS = {}
 VERIFICATION_ICON_ID = 25  # icono que debe ponerse el usuario
+
+# ------------------ BUSCAR PARTIDA ------------------
+
+# Último uso de "Buscar partida" por usuario (en memoria; se reinicia si el
+# bot se reinicia, aceptable para un cooldown de minutos).
+SEARCH_COOLDOWNS = {}
 
 # ------------------ RIOT API ------------------
 
@@ -134,6 +141,23 @@ def build_account_embed(acc, summoner):
     embed.add_field(name="", value=f"**Lvl {summoner['summonerLevel']}**", inline=False)
     embed.add_field(name="", value=f"SoloQ: **{acc['solo']}**    FlexQ: **{acc['flex']}**", inline=False)
     embed.set_footer(text="Solo tú puedes verlo • Eliminar este mensaje")
+    return embed
+
+def get_member_lane_role(member):
+    """Devuelve el rol de posición (Top/Jungla/Mid/ADC/Support) que el
+    onboarding de Discord ya le asignó al miembro, o None si no tiene
+    ninguno (no debería pasar, la pregunta es obligatoria)."""
+    lane_ids = set(LANE_ROLES.values())
+    for role in member.roles:
+        if role.id in lane_ids:
+            return role
+    return None
+
+def build_search_embed(lane_name, solo_name, flex_name):
+    embed = discord.Embed(title="🔎 Buscando partida", color=0x2ECC71)
+    embed.add_field(name="Rol principal", value=lane_name, inline=True)
+    embed.add_field(name="Elo SoloQ", value=solo_name, inline=True)
+    embed.add_field(name="Elo FlexQ", value=flex_name, inline=True)
     return embed
 
 # ------------------ VIEWS ------------------
@@ -374,6 +398,82 @@ class Panel(View):
 
         await interaction.followup.send("🔄 Datos actualizados correctamente.", ephemeral=True)
 
+    @discord.ui.button(label="Buscar partida", emoji="🔎", style=discord.ButtonStyle.primary, custom_id="panel_search_game")
+    async def search_game(self, interaction, _):
+        await interaction.response.defer(ephemeral=True)
+        uid = str(interaction.user.id)
+
+        data = load_data()
+        accounts = data.get(uid)
+        primary = next((a for a in accounts if a["primary"]), None) if accounts else None
+        if not primary:
+            return await interaction.followup.send(
+                "❌ Necesitas tener una cuenta de LoL vinculada para buscar partida.",
+                ephemeral=True
+            )
+
+        now = time.time()
+        last_use = SEARCH_COOLDOWNS.get(uid)
+        if last_use and (now - last_use) < SEARCH_COOLDOWN_SECONDS:
+            remaining = int(SEARCH_COOLDOWN_SECONDS - (now - last_use))
+            minutos, segundos = divmod(remaining, 60)
+            return await interaction.followup.send(
+                f"⏳ Ya has publicado una búsqueda hace poco. Espera **{minutos}m {segundos}s** para volver a usarlo.",
+                ephemeral=True
+            )
+
+        lane_role = get_member_lane_role(interaction.user)
+        if not lane_role:
+            return await interaction.followup.send(
+                "❌ No se ha detectado tu rol de posición (lane). Revisa que completaste las "
+                "preguntas de incorporación del servidor.",
+                ephemeral=True
+            )
+
+        solo_tier = primary["solo"]
+        flex_tier = primary["flex"]
+        solo_role = interaction.guild.get_role(SOLO_ROLES.get(solo_tier))
+        flex_role = interaction.guild.get_role(FLEX_ROLES.get(flex_tier))
+        solo_display = solo_role.name if solo_role else solo_tier
+        flex_display = flex_role.name if flex_role else flex_tier
+
+        embed = build_search_embed(lane_role.name, solo_display, flex_display)
+        target_tiers = TIER_SEARCH_WINDOWS.get(solo_tier, [solo_tier])
+
+        sent = 0
+        for tier in target_tiers:
+            channel_id = TIER_CHANNELS.get(tier)
+            channel = interaction.guild.get_channel(channel_id) if channel_id else None
+            if not channel:
+                print(f"[BUSCAR] Canal no encontrado para el tier {tier} (ID {channel_id})")
+                continue
+
+            tier_role = interaction.guild.get_role(SOLO_ROLES.get(tier))
+            mention = tier_role.mention if tier_role else ""
+
+            try:
+                await channel.send(
+                    content=f"{mention} {interaction.user.mention} está buscando partida",
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=True)
+                )
+                sent += 1
+            except discord.Forbidden:
+                print(f"[BUSCAR] Sin permisos para escribir en #{channel.name}")
+
+        if sent == 0:
+            return await interaction.followup.send(
+                "❌ No se pudo publicar el aviso en ningún canal. Revisa la configuración de "
+                "canales y los permisos del bot.",
+                ephemeral=True
+            )
+
+        SEARCH_COOLDOWNS[uid] = now
+        await interaction.followup.send(
+            f"✅ Aviso publicado en {sent} canal(es). ¡Suerte encontrando partida!",
+            ephemeral=True
+        )
+
 # ------------------ REFRESCO AUTOMÁTICO DE RANGOS ------------------
 
 @tasks.loop(hours=12)
@@ -422,7 +522,8 @@ async def deploy_panel():
             "Gestiona tus cuentas de **League of Legends**, roles y rangos directamente desde este panel.\n\n"
             "🔹 **Vincular cuenta:** Añade tu cuenta de LoL\n"
             "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
-            "🔹 **Actualizar datos:** Refresca tu rango automáticamente"
+            "🔹 **Actualizar datos:** Refresca tu rango automáticamente\n"
+            "🔹 **Buscar partida:** Avisa en los canales de tu rango que buscas grupo"
         ),
         color=0x9146FF
     )
