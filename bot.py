@@ -4,6 +4,7 @@ import os
 import threading
 import asyncio
 from urllib.parse import quote
+from discord import app_commands
 from discord.ext import commands, tasks
 from discord.ui import View, Modal, TextInput, Select
 from flask import Flask
@@ -76,6 +77,9 @@ def get_desired_roles(member, region, solo, flex):
     return set(roles)
 
 async def apply_roles(member, region, solo, flex):
+    """Aplica solo la DIFERENCIA entre los roles actuales y los deseados.
+    Idempotente: a quien ya tiene los roles correctos no se le toca nada.
+    Devuelve True si hizo algún cambio, False si no había nada que tocar."""
     desired = get_desired_roles(member, region, solo, flex)
     managed_ids = list(SOLO_ROLES.values()) + list(FLEX_ROLES.values()) + [r[2] for r in REGIONS.values()]
     current = {r for r in member.roles if r.id in managed_ids}
@@ -85,7 +89,7 @@ async def apply_roles(member, region, solo, flex):
 
     if not to_add and not to_remove:
         print(f"[ROLES] {member} sin cambios, no se tocarán roles")
-        return
+        return False
 
     print(f"[ROLES] {member} +{[r.name for r in to_add]} -{[r.name for r in to_remove]}")
 
@@ -93,6 +97,7 @@ async def apply_roles(member, region, solo, flex):
         await member.remove_roles(*to_remove)
     if to_add:
         await member.add_roles(*to_add)
+    return True
 
 async def clear_roles(member):
     managed_ids = list(SOLO_ROLES.values()) + list(FLEX_ROLES.values()) + [r[2] for r in REGIONS.values()]
@@ -426,6 +431,74 @@ async def deploy_panel():
                      icon_url=bot.user.display_avatar.url)
     await channel.send(embed=embed, view=Panel())
 
+# ------------------ NUEVO MIEMBRO ------------------
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    """Si el usuario que entra ya tiene cuenta(s) vinculada(s) en la DB
+    (p.ej. porque venía de otro servidor), le reaplicamos los roles de su
+    cuenta principal usando los datos ya guardados. No se recalcula el rango
+    contra Riot ni se toca a nadie más: solo actúa sobre quien acaba de entrar."""
+    data = load_data()
+    accounts = data.get(str(member.id))
+    if not accounts:
+        return
+
+    primary = next((a for a in accounts if a["primary"]), None)
+    if not primary:
+        return
+
+    await apply_roles(member, primary["region"], primary["solo"], primary["flex"])
+    print(f"[JOIN] {member} ya tenía cuenta vinculada ({primary['riot_id']}), roles reaplicados")
+
+# ------------------ SINCRONIZACIÓN MANUAL ------------------
+
+@bot.tree.command(
+    name="sincronizar_roles",
+    description="Aplica los roles guardados en la DB a quien le falten. No toca a quien ya los tenga correctos."
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def sincronizar_roles(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    data = load_data()
+    corregidos = 0
+    ya_correctos = 0
+    sin_cuenta = 0
+
+    for member in interaction.guild.members:
+        accounts = data.get(str(member.id))
+        primary = next((a for a in accounts if a["primary"]), None) if accounts else None
+
+        if not primary:
+            sin_cuenta += 1
+            continue
+
+        cambio = await apply_roles(member, primary["region"], primary["solo"], primary["flex"])
+        if cambio:
+            corregidos += 1
+        else:
+            ya_correctos += 1
+
+        await asyncio.sleep(0.3)  # evitar rate limit de Discord en servidores grandes
+
+    await interaction.followup.send(
+        "✅ **Sincronización completada**\n"
+        f"🔧 Roles corregidos: **{corregidos}**\n"
+        f"✔️ Ya estaban correctos (no tocados): **{ya_correctos}**\n"
+        f"⏭️ Sin cuenta vinculada en la DB: **{sin_cuenta}**",
+        ephemeral=True
+    )
+
+@sincronizar_roles.error
+async def sincronizar_roles_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "❌ Necesitas permisos de administrador para usar este comando.", ephemeral=True
+        )
+    else:
+        raise error
+
 # ------------------ READY ------------------
 @bot.event
 async def on_ready():
@@ -438,6 +511,12 @@ async def on_ready():
     # (owner_id, puuid), así que NO se registra aquí para evitar que un
     # reinicio reenganche interacciones reales a una instancia con datos falsos.
     bot.add_view(Panel())
+
+    # ---------- REGISTRO DE COMANDOS SLASH ----------
+    # Sync por guild para que /sincronizar_roles esté disponible al instante
+    # (un sync global puede tardar hasta 1h en propagarse).
+    for guild in bot.guilds:
+        await bot.tree.sync(guild=guild)
 
     await deploy_panel()
     update_ranks_loop.start()
