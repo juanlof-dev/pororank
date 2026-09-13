@@ -400,17 +400,19 @@ class Panel(View):
 
     @discord.ui.button(label="Buscar partida", emoji="🔎", style=discord.ButtonStyle.primary, custom_id="panel_search_game")
     async def search_game(self, interaction, _):
-        await interaction.response.defer(ephemeral=True)
         uid = str(interaction.user.id)
-
         data = load_data()
         accounts = data.get(uid)
         primary = next((a for a in accounts if a["primary"]), None) if accounts else None
+
         if not primary:
-            return await interaction.followup.send(
-                "❌ Necesitas tener una cuenta de LoL vinculada para buscar partida.",
-                ephemeral=True
-            )
+            # Sin cuenta vinculada: en vez de un simple aviso, le abrimos
+            # directamente el mismo modal que "Vincular cuenta" (send_modal
+            # debe ser la PRIMERA respuesta a la interacción, así que esto
+            # va antes del defer()).
+            return await interaction.response.send_modal(LinkModal())
+
+        await interaction.response.defer(ephemeral=True)
 
         now = time.time()
         last_use = SEARCH_COOLDOWNS.get(uid)
@@ -517,13 +519,13 @@ async def deploy_panel():
         return
     await channel.purge(limit=5)
     embed = discord.Embed(
-        title="🎮 Vinculación de Cuentas LoL",
+        title="🎮 Vincula tu cuenta y encuentra gente",
         description=(
-            "Gestiona tus cuentas de **League of Legends**, roles y rangos directamente desde este panel.\n\n"
-            "🔹 **Vincular cuenta:** Añade tu cuenta de LoL\n"
+            "Gestiona tus cuentas de **League of Legends** y encuentra gente con la que jugar.\n\n"
+            "🔹 **Vincular cuenta:** Añade tu cuenta de League of Legends\n"
             "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
             "🔹 **Actualizar datos:** Refresca tu rango automáticamente\n"
-            "🔹 **Buscar partida:** Avisa en los canales de tu rango que buscas grupo"
+            "🔸 **Buscar partida:** Avisa en los canales de tu rango que buscas partida"
         ),
         color=0x9146FF
     )
