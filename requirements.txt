@@ -1,5 +1,4 @@
-discord.py==2.6.1
+discord.py
 aiohttp
+flask
 python-dotenv
-Flask
-
