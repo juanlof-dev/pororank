@@ -734,15 +734,24 @@ class Panel(View):
                 )
                 continue
 
-            tier_role = interaction.guild.get_role(
-                SOLO_ROLES.get(tier)
-            )
+            # El canal y el rol deben buscarse en el mismo servidor
+            # al que pertenece el canal de búsqueda.
+            tier_role_id = SOLO_ROLES.get(tier)
+            tier_role = channel.guild.get_role(tier_role_id) if tier_role_id else None
 
-            mention = (
-                tier_role.mention
-                if tier_role
-                else ""
-            )
+            if tier_role:
+                mention = tier_role.mention
+                print(
+                    f"[BUSCAR] {tier}: canal=#{channel.name} "
+                    f"rol={tier_role.name} ({tier_role.id}) mention={mention}"
+                )
+            else:
+                mention = ""
+                print(
+                    f"[BUSCAR] ⚠️ No se encontró el rol SoloQ para {tier}. "
+                    f"ID configurado: {tier_role_id}. "
+                    f"Servidor del canal: {channel.guild.name} ({channel.guild.id})"
+                )
 
             try:
                 await channel.send(
@@ -855,7 +864,8 @@ async def deploy_panel():
 
     print(
         f"✅ [PANEL] Canal encontrado: "
-        f"#{channel.name} ({channel.id})"
+        f"#{channel.name} ({channel.id}) | "
+        f"Servidor: {channel.guild.name} ({channel.guild.id})"
     )
 
     await channel.purge(limit=5)
