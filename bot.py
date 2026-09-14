@@ -734,13 +734,15 @@ async def on_ready():
     bot.add_view(Panel())
 
     # ---------- REGISTRO DE COMANDOS SLASH ----------
-    # Sync por guild para que /sincronizar_roles esté disponible al instante
-    # (un sync global puede tardar hasta 1h en propagarse).
+    # Sync por guild para que los comandos estén disponibles al instante.
     for guild in bot.guilds:
-        await bot.tree.sync(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"🟢 [SYNC] {guild.name}: {[cmd.name for cmd in synced]}")
 
     await deploy_panel()
-    update_ranks_loop.start()
+
+    if not update_ranks_loop.is_running():
+        update_ranks_loop.start()
 
     print("🤖 Bot listo")
 
