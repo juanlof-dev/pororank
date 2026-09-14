@@ -695,7 +695,7 @@ async def composicion_servidor(interaction: discord.Interaction):
     embed = discord.Embed(title="📊 Composición del servidor", color=0x5865F2)
     embed.add_field(
         name="Vinculación de cuentas",
-        value=f"🔴 **{sin_vincular}** sin vincular\n🟢 **{vinculados}** con cuenta vinculada",
+        value=f"🟢 **{vinculados}** con cuenta vinculada\n⚪ **{sin_vincular}** pendientes",
         inline=False
     )
 
