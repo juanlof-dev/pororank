@@ -726,15 +726,12 @@ async def on_ready():
     init_db()
 
     # ---------- VISTAS PERSISTENTES ----------
-    # Solo el Panel necesita sobrevivir a reinicios: es un mensaje fijo en un
-    # canal, sin estado por-usuario en sus custom_id. AccountActionsView es
-    # efímera (mensajes "Ver cuentas" de vida corta) y lleva estado propio
-    # (owner_id, puuid), así que NO se registra aquí para evitar que un
-    # reinicio reenganche interacciones reales a una instancia con datos falsos.
     bot.add_view(Panel())
 
+    # ---------- COMPROBAR COMANDOS ----------
+    print(f"🔎 [COMMANDS] Comandos registrados antes del sync: {[cmd.name for cmd in bot.tree.get_commands()]}")
+
     # ---------- REGISTRO DE COMANDOS SLASH ----------
-    # Sync por guild para que los comandos estén disponibles al instante.
     for guild in bot.guilds:
         synced = await bot.tree.sync(guild=guild)
         print(f"🟢 [SYNC] {guild.name}: {[cmd.name for cmd in synced]}")
@@ -745,7 +742,7 @@ async def on_ready():
         update_ranks_loop.start()
 
     print("🤖 Bot listo")
-
+    
 # ------------------ WEB SERVER ------------------
 
 app = Flask(__name__)
