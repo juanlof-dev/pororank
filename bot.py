@@ -659,63 +659,136 @@ async def sincronizar_roles_error(interaction: discord.Interaction, error: app_c
 @app_commands.checks.has_permissions(administrator=True)
 async def composicion_servidor(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    guild = interaction.guild
 
+    guild = interaction.guild
+    total_miembros = guild.member_count
+
+    # ---------- VINCULACIÓN ----------
     unlinked_role = guild.get_role(UNLINKED_ROLE_ID)
     sin_vincular = len(unlinked_role.members) if unlinked_role else 0
 
-    # Recorremos los roles de SoloQ en su orden natural (Sinrango → Aspirante)
-    # apoyándonos en la lista de miembros que ya mantiene Discord por rol
-    # (role.members), sin tener que iterar a todo el servidor a mano.
+    # Los miembros con cuenta vinculada son los que tienen un rol de SoloQ.
+    # Contamos usuarios únicos para evitar duplicados.
+    vinculados_ids = set()
+
+    for tier, role_id in SOLO_ROLES.items():
+        role = guild.get_role(role_id)
+        if role:
+            vinculados_ids.update(member.id for member in role.members)
+
+    vinculados = len(vinculados_ids)
+
+    # Porcentajes sobre el total de miembros del servidor.
+    if total_miembros > 0:
+        porcentaje_vinculados = round((vinculados / total_miembros) * 100)
+        porcentaje_sin_vincular = round((sin_vincular / total_miembros) * 100)
+    else:
+        porcentaje_vinculados = 0
+        porcentaje_sin_vincular = 0
+
+    # ---------- SOLOQ ----------
+    # De mayor a menor rango:
+    # Aspirante → Gran Maestro → Maestro → Diamante → ...
     tier_order = list(SOLO_ROLES.keys())
+
     solo_counts = []
-    vinculados = 0
+
     for tier in tier_order:
         role = guild.get_role(SOLO_ROLES[tier])
+
         if not role:
             continue
+
         count = len(role.members)
-        vinculados += count
+
         if count > 0:
             solo_counts.append((tier, count))
-    # de mayor a menor rango, como en el ejemplo
-    solo_counts.sort(key=lambda item: tier_order.index(item[0]), reverse=True)
 
+    solo_counts.sort(
+        key=lambda item: tier_order.index(item[0]),
+        reverse=True
+    )
+
+    # ---------- ROL PRINCIPAL ----------
     lane_counts = []
+
     for lane, role_id in LANE_ROLES.items():
         role = guild.get_role(role_id)
+
         if not role:
             continue
+
         count = len(role.members)
+
         if count > 0:
             emoji = LANE_EMOJIS.get(lane, "")
             label = f"{emoji} {role.name}".strip()
             lane_counts.append((label, count))
 
-    embed = discord.Embed(title="📊 Composición del servidor", color=0x5865F2)
+    # ---------- EMBED ----------
+    embed = discord.Embed(
+        title="📊 COMPOSICIÓN DEL SERVIDOR",
+        color=0x5865F2
+    )
+
+    # 👥 Total de miembros
     embed.add_field(
-        name="Vinculación de cuentas",
-        value=f"🟢 **{vinculados}** con cuenta vinculada\n⚪ **{sin_vincular}** pendientes",
+        name="👥 Miembros",
+        value=f"**{total_miembros} miembros**",
         inline=False
     )
 
+    # 🔗 Vinculación
+    embed.add_field(
+        name="🔗 Vinculación",
+        value=(
+            f"🟢 **{vinculados} vinculadas** · {porcentaje_vinculados}%\n"
+            f"⚪ **{sin_vincular} pendientes** · {porcentaje_sin_vincular}%"
+        ),
+        inline=False
+    )
+
+    # 🏆 SoloQ
     if solo_counts:
         solo_lines = "\n".join(
-            f"{format_tier_display(tier)}: **{count}**" for tier, count in solo_counts
+            f"{format_tier_display(tier)} · **{count}**"
+            for tier, count in solo_counts
         )
-        embed.add_field(name="Por rango en SoloQ", value=solo_lines, inline=False)
 
+        embed.add_field(
+            name="🏆 SoloQ",
+            value=solo_lines,
+            inline=False
+        )
+
+    # 🎮 Rol principal
     if lane_counts:
-        lane_lines = "\n".join(f"{label}: **{count}**" for label, count in lane_counts)
-        embed.add_field(name="Por rol principal", value=lane_lines, inline=False)
+        lane_lines = "\n".join(
+            f"{label} · **{count}**"
+            for label, count in lane_counts
+        )
 
-    await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.add_field(
+            name="🎮 Rol principal",
+            value=lane_lines,
+            inline=False
+        )
+
+    await interaction.followup.send(
+        embed=embed,
+        ephemeral=True
+    )
+
 
 @composicion_servidor.error
-async def composicion_servidor_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+async def composicion_servidor_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError
+):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
-            "❌ Necesitas permisos de administrador para usar este comando.", ephemeral=True
+            "❌ Necesitas permisos de administrador para usar este comando.",
+            ephemeral=True
         )
     else:
         raise error
