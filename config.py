@@ -12,6 +12,10 @@ HYBRID_MODE = True  # 👈 IMPORTANTE
 PANEL_CHANNEL_ID = 1468511949368197191
 LOG_CHANNEL_ID = 1410499822334640156
 
+# 📌 Rol que tiene cualquiera que no ha vinculado ninguna cuenta. El bot lo
+# quita al vincular con éxito, y lo vuelve a poner si se queda sin cuentas.
+UNLINKED_ROLE_ID = 1547926475657969724
+
 
 REGIONS = {
     "EUW": ("euw1", "europe", 1409214841973112922),
@@ -100,3 +104,44 @@ LANE_ROLES = {
 
 # 📌 Cooldown del botón "Buscar partida", en segundos
 SEARCH_COOLDOWN_SECONDS = 600  # 10 minutos
+
+# 📌 Traducción de los tiers (tal como los devuelve la API de Riot) a lo que
+# ve el usuario. Solo afecta a la presentación: toda la lógica interna sigue
+# usando las claves de Riot (IRON, GOLD, etc.) sin tocar nada.
+TIER_DISPLAY_ES = {
+    "UNRANKED": "Sin rango",
+    "IRON": "Hierro",
+    "BRONZE": "Bronce",
+    "SILVER": "Plata",
+    "GOLD": "Oro",
+    "PLATINUM": "Platino",
+    "EMERALD": "Esmeralda",
+    "DIAMOND": "Diamante",
+    "MASTER": "Maestro",
+    "GRANDMASTER": "Gran Maestro",
+    "CHALLENGER": "Aspirante",
+}
+
+# 📌 Emojis personalizados por tier. Sin rango no lleva emoji (cadena vacía).
+TIER_EMOJIS = {
+    "UNRANKED": "",
+    "IRON": "<:Hierro:1548994412540072047>",
+    "BRONZE": "<:Bronce:1548994377261654118>",
+    "SILVER": "<:Plata:1548994348014641313>",
+    "GOLD": "<:Oro:1548994313944436817>",
+    "PLATINUM": "<:Platino:1548994274140626974>",
+    "EMERALD": "<:Esmeralda:1548994229307707463>",
+    "DIAMOND": "<:Diamante:1548994195707011072>",
+    "MASTER": "<:Maestro:1548994154992771092>",
+    "GRANDMASTER": "<:Gran_Maestro:1548994124529537134>",
+    "CHALLENGER": "<:Aspirante:1548993457694179388>",
+}
+
+# 📌 Emojis personalizados por lane, misma clave que LANE_ROLES.
+LANE_EMOJIS = {
+    "TOP": "<:toplane:1548290209647435856>",
+    "JUNGLE": "<:jungla:1548290060258906132>",
+    "MID": "<:midlane:1548290125488717864>",
+    "ADC": "<:adc:1548290010514460763>",
+    "SUPPORT": "<:support:1548290176093134990>",
+}
