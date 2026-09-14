@@ -661,33 +661,56 @@ async def composicion_servidor(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     guild = interaction.guild
-    total_miembros = guild.member_count
+
+    # ---------- MIEMBROS HUMANOS ----------
+    miembros_humanos = [
+        member for member in guild.members
+        if not member.bot
+    ]
+
+    total_miembros = len(miembros_humanos)
 
     # ---------- VINCULACIÓN ----------
     unlinked_role = guild.get_role(UNLINKED_ROLE_ID)
-    sin_vincular = len(unlinked_role.members) if unlinked_role else 0
+
+    if unlinked_role:
+        sin_vincular = sum(
+            1 for member in unlinked_role.members
+            if not member.bot
+        )
+    else:
+        sin_vincular = 0
 
     # Los miembros con cuenta vinculada son los que tienen un rol de SoloQ.
-    # Contamos usuarios únicos para evitar duplicados.
+    # Usamos IDs únicos para evitar contar dos veces al mismo usuario.
     vinculados_ids = set()
 
     for tier, role_id in SOLO_ROLES.items():
         role = guild.get_role(role_id)
+
         if role:
-            vinculados_ids.update(member.id for member in role.members)
+            vinculados_ids.update(
+                member.id
+                for member in role.members
+                if not member.bot
+            )
 
     vinculados = len(vinculados_ids)
 
-    # Porcentajes sobre el total de miembros del servidor.
+    # ---------- PORCENTAJES ----------
     if total_miembros > 0:
-        porcentaje_vinculados = round((vinculados / total_miembros) * 100)
-        porcentaje_sin_vincular = round((sin_vincular / total_miembros) * 100)
+        porcentaje_vinculados = round(
+            (vinculados / total_miembros) * 100
+        )
+        porcentaje_sin_vincular = round(
+            (sin_vincular / total_miembros) * 100
+        )
     else:
         porcentaje_vinculados = 0
         porcentaje_sin_vincular = 0
 
     # ---------- SOLOQ ----------
-    # De mayor a menor rango:
+    # De mayor a menor:
     # Aspirante → Gran Maestro → Maestro → Diamante → ...
     tier_order = list(SOLO_ROLES.keys())
 
@@ -699,7 +722,10 @@ async def composicion_servidor(interaction: discord.Interaction):
         if not role:
             continue
 
-        count = len(role.members)
+        count = sum(
+            1 for member in role.members
+            if not member.bot
+        )
 
         if count > 0:
             solo_counts.append((tier, count))
@@ -718,7 +744,10 @@ async def composicion_servidor(interaction: discord.Interaction):
         if not role:
             continue
 
-        count = len(role.members)
+        count = sum(
+            1 for member in role.members
+            if not member.bot
+        )
 
         if count > 0:
             emoji = LANE_EMOJIS.get(lane, "")
@@ -792,7 +821,6 @@ async def composicion_servidor_error(
         )
     else:
         raise error
-
 # ------------------ READY ------------------
 @bot.event
 async def on_ready():
