@@ -658,7 +658,7 @@ async def sincronizar_roles_error(interaction: discord.Interaction, error: app_c
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def composicion_servidor(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     guild = interaction.guild
 
@@ -804,9 +804,8 @@ async def composicion_servidor(interaction: discord.Interaction):
         )
 
     await interaction.followup.send(
-        embed=embed,
-        ephemeral=True
-    )
+    embed=embed
+)
 
 
 @composicion_servidor.error
