@@ -4,6 +4,7 @@ import os
 import threading
 import asyncio
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -11,7 +12,11 @@ from discord.ui import View, Modal, TextInput, Select
 from flask import Flask
 
 from config import *
-from database import load_data, save_data, init_db
+from database import (
+    load_data, save_data, init_db,
+    has_linked_before, get_unlinked_tracking, get_all_unlinked_tracking,
+    start_unlinked_tracking, stop_unlinked_tracking, mark_reminder_sent,
+)
 
 # ------------------ BOT ------------------
 
@@ -320,6 +325,7 @@ class VerifyIconView(View):
 
         await apply_roles(interaction.user, acc["region"], solo, flex)
         del PENDING_VERIFICATIONS[self.user_id]
+        stop_unlinked_tracking(self.user_id)  # ya vinculó, para el cronómetro de recordatorios
 
         await interaction.followup.send("✅ **Cuenta vinculada correctamente**",
                                         embed=build_account_embed(acc, summoner), ephemeral=True)
@@ -607,18 +613,28 @@ async def on_member_join(member: discord.Member):
     """Si el usuario que entra ya tiene cuenta(s) vinculada(s) en la DB
     (p.ej. porque venía de otro servidor), le reaplicamos los roles de su
     cuenta principal usando los datos ya guardados. No se recalcula el rango
-    contra Riot ni se toca a nadie más: solo actúa sobre quien acaba de entrar."""
+    contra Riot ni se toca a nadie más: solo actúa sobre quien acaba de entrar.
+
+    Si nunca ha vinculado nada, arrancamos el cronómetro de recordatorios de
+    vinculación (24h/72h) usando su fecha real de entrada."""
     data = load_data()
     accounts = data.get(str(member.id))
-    if not accounts:
+    primary = next((a for a in accounts if a["primary"]), None) if accounts else None
+
+    if primary:
+        await apply_roles(member, primary["region"], primary["solo"], primary["flex"])
+        print(f"[JOIN] {member} ya tenía cuenta vinculada ({primary['riot_id']}), roles reaplicados")
         return
 
-    primary = next((a for a in accounts if a["primary"]), None)
-    if not primary:
-        return
+    if not has_linked_before(str(member.id)):
+        start_unlinked_tracking(str(member.id), member.joined_at.isoformat())
 
-    await apply_roles(member, primary["region"], primary["solo"], primary["flex"])
-    print(f"[JOIN] {member} ya tenía cuenta vinculada ({primary['riot_id']}), roles reaplicados")
+@bot.event
+async def on_member_remove(member: discord.Member):
+    """Limpieza: si se va del servidor, no tiene sentido seguir su
+    seguimiento de recordatorios (y evita mandarle un MD a quien ya no
+    compartimos servidor)."""
+    stop_unlinked_tracking(str(member.id))
 
 # ------------------ SINCRONIZACIÓN MANUAL ------------------
 
@@ -932,6 +948,148 @@ async def ultimos_error(interaction: discord.Interaction, error: app_commands.Ap
     else:
         raise error
 
+# ------------------ RECORDATORIOS DE VINCULACIÓN ------------------
+
+async def send_unlinked_reminder(member: discord.Member, guild: discord.Guild, stage: str,
+                                  elapsed: timedelta, log_channel):
+    """Manda el MD de recordatorio (24h o 72h) y registra el resultado en el
+    canal de log. stage: '24h' o '72h'."""
+    hours = int(elapsed.total_seconds() // 3600)
+    minutes = int((elapsed.total_seconds() % 3600) // 60)
+    tiempo_str = f"{hours}h {minutes}min"
+
+    jump_url = f"https://discord.com/channels/{guild.id}/{PANEL_CHANNEL_ID}"
+    link_view = View()
+    link_view.add_item(discord.ui.Button(
+        label="Ir a vincular mi cuenta", emoji="🔗",
+        style=discord.ButtonStyle.link, url=jump_url
+    ))
+
+    if stage == "24h":
+        embed = discord.Embed(
+            title=f"🔗 Te falta un paso para completar tu entrada en {guild.name}",
+            description=(
+                "Hemos visto que todavía no has vinculado tu cuenta de League of Legends.\n\n"
+                "Vincularla te da tus roles de rango y te permite usar **Buscar partida** "
+                "para encontrar gente con la que jugar ahora mismo.\n\n"
+                "📍 Puedes hacerlo en cualquier momento desde el canal de vinculación del servidor."
+            ),
+            color=0xF1C40F
+        )
+        embed.set_footer(text="Mensaje automático · se envía una sola vez")
+    else:
+        embed = discord.Embed(
+            title="🔗 ¿Sigues buscando gente con la que jugar?",
+            description=(
+                f"Todavía tienes pendiente vincular tu cuenta en **{guild.name}**.\n\n"
+                "En cuanto la vincules, desbloqueas tus canales de rango y **Buscar partida** "
+                "para encontrar grupo al instante.\n\n"
+                "📍 Te esperamos en el canal de vinculación."
+            ),
+            color=0xE74C3C
+        )
+        embed.set_footer(text="Último recordatorio automático · no recibirás más MD sobre esto")
+
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    dm_ok = True
+    fail_reason = ""
+    try:
+        await member.send(embed=embed, view=link_view)
+    except discord.Forbidden:
+        dm_ok = False
+        fail_reason = "tiene los MDs cerrados"
+    except discord.HTTPException as e:
+        dm_ok = False
+        fail_reason = f"error de Discord ({e.status})"
+
+    if not log_channel:
+        return
+
+    estado = "✅ MD enviado correctamente" if dm_ok else f"❌ MD no entregado — {fail_reason}"
+    if stage == "24h":
+        emoji_titulo, etiqueta, color_log = "⚠️", "Recordatorio de vinculación enviado (24h)", 0xF1C40F
+    else:
+        emoji_titulo, etiqueta, color_log = "🔴", "Segundo recordatorio enviado (72h)", 0xE74C3C
+
+    log_embed = discord.Embed(
+        title=f"{emoji_titulo} {etiqueta}",
+        description=(
+            f"👤 {member.mention}\n"
+            f"🕐 Lleva **{tiempo_str}** sin vincular\n"
+            f"🔗 {estado}\n"
+            f"📅 Entrada: {member.joined_at.strftime('%d/%m/%Y %H:%M')}"
+        ),
+        color=color_log
+    )
+    try:
+        await log_channel.send(embed=log_embed)
+    except discord.Forbidden:
+        print("[RECORDATORIO] Sin permisos para escribir en el canal de log")
+
+async def process_unlinked_member(member: discord.Member, guild: discord.Guild, record: dict,
+                                   now: datetime, log_channel):
+    since = datetime.fromisoformat(record["unlinked_since"])
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    elapsed = now - since
+    uid = str(member.id)
+
+    if elapsed >= timedelta(hours=72) and not record["reminder_72h_sent"]:
+        if not record["reminder_24h_sent"]:
+            # Se pasó de las 24h sin que lo pilláramos (p.ej. bot caído):
+            # no mandamos ya el de 24h caducado, solo lo damos por hecho
+            # y mandamos directamente el de 72h.
+            mark_reminder_sent(uid, "24h")
+        await send_unlinked_reminder(member, guild, "72h", elapsed, log_channel)
+        mark_reminder_sent(uid, "72h")
+
+    elif elapsed >= timedelta(hours=24) and not record["reminder_24h_sent"]:
+        await send_unlinked_reminder(member, guild, "24h", elapsed, log_channel)
+        mark_reminder_sent(uid, "24h")
+
+async def backfill_unlinked_tracking():
+    """Al arrancar: crea seguimiento para quien ya estaba en el servidor,
+    nunca ha vinculado nada, y aún no tenía seguimiento (porque se unió
+    antes de que existiera esta función). No toca a quien ya tiene fila —
+    eso reiniciaría sus recordatorios ya enviados."""
+    for guild in bot.guilds:
+        role = guild.get_role(UNLINKED_ROLE_ID)
+        if not role:
+            continue
+        for member in role.members:
+            if member.bot:
+                continue
+            uid = str(member.id)
+            if has_linked_before(uid) or get_unlinked_tracking(uid):
+                continue
+            start_unlinked_tracking(uid, member.joined_at.isoformat())
+
+@tasks.loop(hours=3)
+async def check_unlinked_reminders_loop():
+    print("🔔 Comprobando recordatorios de vinculación...")
+    log_channel = bot.get_channel(REMINDER_LOG_CHANNEL_ID)
+    now = discord.utils.utcnow()
+
+    for uid, record in get_all_unlinked_tracking().items():
+        member = None
+        member_guild = None
+        for guild in bot.guilds:
+            m = guild.get_member(int(uid))
+            if m:
+                member, member_guild = m, guild
+                break
+
+        if not member:
+            stop_unlinked_tracking(uid)  # ya no comparte servidor con nosotros
+            continue
+
+        await process_unlinked_member(member, member_guild, record, now, log_channel)
+        await asyncio.sleep(0.3)
+
+    print("✅ Recordatorios comprobados.")
+
 # ------------------ READY ------------------
 @bot.event
 async def on_ready():
@@ -956,6 +1114,14 @@ async def on_ready():
 
     if not update_ranks_loop.is_running():
         update_ranks_loop.start()
+
+    # Backfill antes de arrancar el loop: crea seguimiento para quien ya
+    # estaba sin vincular desde antes de que existiera esta función, usando
+    # su fecha real de entrada. La primera pasada del loop (que se ejecuta
+    # de inmediato al arrancar) ya les mandará el recordatorio si les toca.
+    await backfill_unlinked_tracking()
+    if not check_unlinked_reminders_loop.is_running():
+        check_unlinked_reminders_loop.start()
 
     print("🤖 Bot listo")
     
