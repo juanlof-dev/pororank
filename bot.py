@@ -18,6 +18,7 @@ from database import load_data, save_data, init_db
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True  # necesario si en el futuro usas comandos con prefijo "!"
+intents.presences = True  # necesario para /online (saber quién está conectado)
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ------------------ VERIFICACIÓN ------------------
@@ -181,6 +182,23 @@ def get_lane_display(role):
     key = next((k for k, v in LANE_ROLES.items() if v == role.id), None)
     emoji = LANE_EMOJIS.get(key, "") if key else ""
     return f"{emoji} {role.name}".strip()
+
+def humanize_delta(delta):
+    """'hace 12 min' / 'hace 2 h' / 'ayer' / 'hace 3 días', a partir de un
+    timedelta transcurrido."""
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return "hace unos segundos"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"hace {minutes} min"
+    hours = minutes // 60
+    if hours < 24:
+        return f"hace {hours} h"
+    days = hours // 24
+    if days == 1:
+        return "ayer"
+    return f"hace {days} días"
 
 def build_search_embed(lane_name, solo_name, flex_name):
     embed = discord.Embed(title="🔎 Buscando partida", color=0x2ECC71)
@@ -653,11 +671,10 @@ async def sincronizar_roles_error(interaction: discord.Interaction, error: app_c
 # ------------------ COMPOSICIÓN DEL SERVIDOR ------------------
 
 @bot.tree.command(
-    name="composicion_servidor",
+    name="servidor",
     description="Cuántos miembros hay vinculados/sin vincular, por rango de SoloQ y por rol principal."
 )
-@app_commands.checks.has_permissions(administrator=True)
-async def composicion_servidor(interaction: discord.Interaction):
+async def servidor(interaction: discord.Interaction):
     await interaction.response.defer()
 
     guild = interaction.guild
@@ -807,19 +824,114 @@ async def composicion_servidor(interaction: discord.Interaction):
     embed=embed
 )
 
+# ------------------ JUGADORES ONLINE ------------------
 
-@composicion_servidor.error
-async def composicion_servidor_error(
-    interaction: discord.Interaction,
-    error: app_commands.AppCommandError
-):
+@bot.tree.command(
+    name="online",
+    description="Quién está conectado ahora mismo, por rango de SoloQ y por rol principal."
+)
+async def online(interaction: discord.Interaction):
+    await interaction.response.defer()
+    guild = interaction.guild
+
+    # "Jugador online" = miembro humano, conectado (no offline/invisible) Y
+    # con cuenta vinculada (tiene un rol de tier de SoloQ). Así el total y
+    # los desgloses por rango/lane siempre cuadran entre sí.
+    online_ids = set()
+    tier_order = list(SOLO_ROLES.keys())
+    solo_counts = []
+
+    for tier in tier_order:
+        role = guild.get_role(SOLO_ROLES[tier])
+        if not role:
+            continue
+        count = 0
+        for member in role.members:
+            if member.bot or member.status == discord.Status.offline:
+                continue
+            online_ids.add(member.id)
+            count += 1
+        if count > 0:
+            solo_counts.append((tier, count))
+    solo_counts.sort(key=lambda item: tier_order.index(item[0]), reverse=True)
+
+    lane_counts = []
+    for lane, role_id in LANE_ROLES.items():
+        role = guild.get_role(role_id)
+        if not role:
+            continue
+        count = sum(1 for member in role.members if member.id in online_ids)
+        if count > 0:
+            emoji = LANE_EMOJIS.get(lane, "")
+            label = f"{emoji} {role.name}".strip()
+            lane_counts.append((label, count))
+
+    total = len(online_ids)
+    embed = discord.Embed(title="🟢 JUGADORES ONLINE", color=0x57F287)
+
+    if total == 0:
+        embed.description = "No hay ningún jugador con cuenta vinculada conectado ahora mismo."
+        return await interaction.followup.send(embed=embed)
+
+    embed.description = f"**{total}** jugadores conectados"
+
+    solo_lines = "\n".join(
+        f"{format_tier_display(tier)} · **{count}**" for tier, count in solo_counts
+    )
+    embed.add_field(name="🏆 Por rango", value=solo_lines, inline=False)
+
+    if lane_counts:
+        lane_lines = "\n".join(f"{label} · **{count}**" for label, count in lane_counts)
+        embed.add_field(name="🎮 Por rol", value=lane_lines, inline=False)
+
+    await interaction.followup.send(embed=embed)
+
+# ------------------ ÚLTIMOS EN LLEGAR ------------------
+
+@bot.tree.command(
+    name="ultimos",
+    description="Últimos 5 miembros en unirse al servidor y si han vinculado cuenta."
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def ultimos(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    humanos = [m for m in guild.members if not m.bot and m.joined_at]
+    humanos.sort(key=lambda m: m.joined_at, reverse=True)
+    ultimos_miembros = humanos[:5]
+
+    if not ultimos_miembros:
+        return await interaction.followup.send("No hay miembros que mostrar.", ephemeral=True)
+
+    now = discord.utils.utcnow()
+    lines = []
+    for member in ultimos_miembros:
+        tiempo = humanize_delta(now - member.joined_at)
+        # Vinculado si NO tiene el rol "Sin vincular" — coherente con cómo
+        # el resto del bot determina el estado de vinculación.
+        vinculado = not any(r.id == UNLINKED_ROLE_ID for r in member.roles)
+        estado = "🟢" if vinculado else "🔴"
+        lines.append(f"{estado} {member.mention} — {tiempo}")
+
+    embed = discord.Embed(
+        title="🕐 ÚLTIMOS EN LLEGAR",
+        description="\n".join(lines),
+        color=0x5865F2
+    )
+    embed.set_footer(text=f"Últimos {len(ultimos_miembros)} miembros")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@ultimos.error
+async def ultimos_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
-            "❌ Necesitas permisos de administrador para usar este comando.",
-            ephemeral=True
+            "❌ Necesitas permisos de administrador para usar este comando.", ephemeral=True
         )
     else:
         raise error
+
 # ------------------ READY ------------------
 @bot.event
 async def on_ready():
