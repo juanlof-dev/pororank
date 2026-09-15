@@ -15,6 +15,14 @@ def init_db():
             data TEXT NOT NULL
         )
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS unlinked_tracking (
+            user_id TEXT PRIMARY KEY,
+            unlinked_since TEXT NOT NULL,
+            reminder_24h_sent INTEGER NOT NULL DEFAULT 0,
+            reminder_72h_sent INTEGER NOT NULL DEFAULT 0
+        )
+        """)
 
 def load_data():
     with get_conn() as conn:
@@ -36,3 +44,62 @@ def save_data(data):
 
             """, (uid, json.dumps(accs)))
 
+def has_linked_before(user_id):
+    """True si esta persona tiene fila en accounts (vinculó alguna vez,
+    aunque ahora mismo se haya quedado sin ninguna cuenta activa)."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM accounts WHERE user_id=?", (user_id,))
+        return cur.fetchone() is not None
+
+def get_unlinked_tracking(user_id):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT unlinked_since, reminder_24h_sent, reminder_72h_sent "
+            "FROM unlinked_tracking WHERE user_id=?", (user_id,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "unlinked_since": row[0],
+        "reminder_24h_sent": bool(row[1]),
+        "reminder_72h_sent": bool(row[2]),
+    }
+
+def get_all_unlinked_tracking():
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, unlinked_since, reminder_24h_sent, reminder_72h_sent FROM unlinked_tracking")
+        rows = cur.fetchall()
+    return {
+        uid: {
+            "unlinked_since": since,
+            "reminder_24h_sent": bool(r24),
+            "reminder_72h_sent": bool(r72),
+        }
+        for uid, since, r24, r72 in rows
+    }
+
+def start_unlinked_tracking(user_id, unlinked_since_iso):
+    """Crea o REINICIA el seguimiento (recordatorios a 0) de alguien que
+    empieza a estar sin vincular. Usar solo para quien nunca ha vinculado
+    nada — para quien ya vinculó antes, no se llama a esta función."""
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT INTO unlinked_tracking (user_id, unlinked_since, reminder_24h_sent, reminder_72h_sent)
+        VALUES (?, ?, 0, 0)
+        ON CONFLICT(user_id)
+        DO UPDATE SET unlinked_since=excluded.unlinked_since, reminder_24h_sent=0, reminder_72h_sent=0
+        """, (user_id, unlinked_since_iso))
+
+def stop_unlinked_tracking(user_id):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM unlinked_tracking WHERE user_id=?", (user_id,))
+
+def mark_reminder_sent(user_id, which):
+    """which: '24h' o '72h'"""
+    column = "reminder_24h_sent" if which == "24h" else "reminder_72h_sent"
+    with get_conn() as conn:
+        conn.execute(f"UPDATE unlinked_tracking SET {column}=1 WHERE user_id=?", (user_id,))
