@@ -16,6 +16,9 @@ LOG_CHANNEL_ID = 1410499822334640156
 # quita al vincular con éxito, y lo vuelve a poner si se queda sin cuentas.
 UNLINKED_ROLE_ID = 1547926475657969724
 
+# 📌 Canal donde se registran los recordatorios de vinculación (24h/72h)
+REMINDER_LOG_CHANNEL_ID = 1549497413675524287
+
 
 REGIONS = {
     "EUW": ("euw1", "europe", 1547292715270807593),
