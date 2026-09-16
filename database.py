@@ -23,6 +23,15 @@ def init_db():
             reminder_72h_sent INTEGER NOT NULL DEFAULT 0
         )
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS active_groups (
+            thread_id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            creator_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """)
 
 def load_data():
     with get_conn() as conn:
@@ -103,3 +112,42 @@ def mark_reminder_sent(user_id, which):
     column = "reminder_24h_sent" if which == "24h" else "reminder_72h_sent"
     with get_conn() as conn:
         conn.execute(f"UPDATE unlinked_tracking SET {column}=1 WHERE user_id=?", (user_id,))
+
+def create_group(thread_id, message_id, channel_id, creator_id, created_at_iso):
+    """Registra un grupo de 'Buscar partida' recién creado, para poder
+    reconstruir sus botones tras un reinicio y para el borrado automático."""
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT INTO active_groups (thread_id, message_id, channel_id, creator_id, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+            message_id=excluded.message_id, channel_id=excluded.channel_id,
+            creator_id=excluded.creator_id, created_at=excluded.created_at
+        """, (str(thread_id), str(message_id), str(channel_id), str(creator_id), created_at_iso))
+
+def get_group(thread_id):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT thread_id, message_id, channel_id, creator_id, created_at "
+            "FROM active_groups WHERE thread_id=?", (str(thread_id),)
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {"thread_id": row[0], "message_id": row[1], "channel_id": row[2],
+            "creator_id": row[3], "created_at": row[4]}
+
+def get_all_groups():
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT thread_id, message_id, channel_id, creator_id, created_at FROM active_groups")
+        rows = cur.fetchall()
+    return [
+        {"thread_id": tid, "message_id": mid, "channel_id": cid, "creator_id": crid, "created_at": ca}
+        for tid, mid, cid, crid, ca in rows
+    ]
+
+def delete_group(thread_id):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM active_groups WHERE thread_id=?", (str(thread_id),))
