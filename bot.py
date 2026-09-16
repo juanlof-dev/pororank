@@ -16,6 +16,7 @@ from database import (
     load_data, save_data, init_db,
     has_linked_before, get_unlinked_tracking, get_all_unlinked_tracking,
     start_unlinked_tracking, stop_unlinked_tracking, mark_reminder_sent,
+    create_group, get_group, get_all_groups, delete_group,
 )
 
 # ------------------ BOT ------------------
@@ -212,6 +213,177 @@ def build_search_embed(lane_name, solo_name, flex_name):
     embed.add_field(name="Elo FlexQ", value=flex_name, inline=True)
     return embed
 
+async def update_group_embed(thread: discord.Thread):
+    """Reconstruye el embed del grupo a partir del propio hilo (fuente de
+    verdad): quién está dentro (thread.fetch_members()) y si está cerrado
+    (thread.locked). No guardamos la lista de miembros en ningún sitio
+    aparte — siempre se lee de Discord."""
+    group = get_group(thread.id)
+    if not group:
+        return
+
+    channel = bot.get_channel(int(group["channel_id"]))
+    if not channel:
+        try:
+            channel = await bot.fetch_channel(int(group["channel_id"]))
+        except discord.HTTPException:
+            return
+
+    try:
+        message = await channel.fetch_message(int(group["message_id"]))
+    except discord.HTTPException:
+        return
+
+    try:
+        thread_members = await thread.fetch_members()
+    except discord.HTTPException:
+        thread_members = []
+
+    guild = thread.guild
+    lines = []
+    for tm in thread_members:
+        member = guild.get_member(tm.id)
+        if not member or member.bot:
+            continue
+        lane_role = get_member_lane_role(member)
+        lane_display = get_lane_display(lane_role) if lane_role else "—"
+        lines.append(f"{member.display_name} · {lane_display}")
+
+    embed = discord.Embed.from_dict(message.embeds[0].to_dict()) if message.embeds else discord.Embed()
+    embed.title = "🔒 Grupo Cerrado" if thread.locked else "🟢 Grupo Abierto"
+    embed.color = 0xE74C3C if thread.locked else 0x2ECC71
+
+    # Quitamos cualquier campo "Miembros" de una actualización anterior para
+    # no duplicarlo, conservando el resto de campos (Rol principal, Elos).
+    kept_fields = [f for f in embed.fields if f.name != "👥 Miembros"]
+    embed.clear_fields()
+    for f in kept_fields:
+        embed.add_field(name=f.name, value=f.value, inline=f.inline)
+    if lines:
+        embed.add_field(name="👥 Miembros", value="\n".join(lines), inline=False)
+
+    try:
+        await message.edit(embed=embed)
+    except discord.HTTPException:
+        pass
+
+class GroupView(View):
+    """Vista dinámica del grupo: Unirse / Salir del grupo / Cerrar grupo.
+    Los custom_id llevan el thread_id (y el creator_id en 'cerrar') dentro,
+    así que no hace falta guardar nada aparte para que los botones sigan
+    funcionando tras un reinicio — solo hay que volver a registrar esta
+    vista al arrancar (ver reregister_group_views)."""
+
+    def __init__(self, thread_id: int, creator_id: int):
+        super().__init__(timeout=None)
+        self.thread_id = thread_id
+        self.creator_id = creator_id
+
+        join_btn = discord.ui.Button(
+            label="Unirse", emoji="✅", style=discord.ButtonStyle.success,
+            custom_id=f"group_join:{thread_id}"
+        )
+        join_btn.callback = self.join
+        self.add_item(join_btn)
+
+        leave_btn = discord.ui.Button(
+            label="Salir del grupo", emoji="🚪", style=discord.ButtonStyle.secondary,
+            custom_id=f"group_leave:{thread_id}"
+        )
+        leave_btn.callback = self.leave
+        self.add_item(leave_btn)
+
+        close_btn = discord.ui.Button(
+            label="Cerrar grupo", emoji="🔒", style=discord.ButtonStyle.danger,
+            custom_id=f"group_close:{thread_id}:{creator_id}"
+        )
+        close_btn.callback = self.close_group
+        self.add_item(close_btn)
+
+    async def _get_thread(self, interaction: discord.Interaction):
+        thread = interaction.guild.get_channel_or_thread(self.thread_id)
+        if thread:
+            return thread
+        try:
+            return await bot.fetch_channel(self.thread_id)
+        except discord.HTTPException:
+            return None
+
+    async def join(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        uid = str(interaction.user.id)
+        data = load_data()
+        accounts = data.get(uid)
+        primary = next((a for a in accounts if a["primary"]), None) if accounts else None
+        if not primary:
+            return await interaction.followup.send(
+                "❌ Necesitas tener una cuenta vinculada para unirte a un grupo.", ephemeral=True
+            )
+
+        thread = await self._get_thread(interaction)
+        if not thread:
+            return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
+        if thread.locked:
+            return await interaction.followup.send(
+                "🔒 Este grupo está cerrado, no admite más gente.", ephemeral=True
+            )
+
+        try:
+            members = await thread.fetch_members()
+        except discord.HTTPException:
+            members = []
+        if interaction.user.id in [m.id for m in members]:
+            return await interaction.followup.send("Ya estás en este grupo.", ephemeral=True)
+
+        if thread.archived:
+            await thread.edit(archived=False)
+        await thread.add_user(interaction.user)
+        await update_group_embed(thread)
+        await interaction.followup.send(
+            f"✅ Te has unido al grupo. Habla con ellos en {thread.mention}.", ephemeral=True
+        )
+
+    async def leave(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        if interaction.user.id == self.creator_id:
+            return await interaction.followup.send(
+                "Eres el creador del grupo — usa **Cerrar grupo** si quieres dejar de admitir gente.",
+                ephemeral=True
+            )
+
+        thread = await self._get_thread(interaction)
+        if not thread:
+            return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
+
+        try:
+            members = await thread.fetch_members()
+        except discord.HTTPException:
+            members = []
+        if interaction.user.id not in [m.id for m in members]:
+            return await interaction.followup.send("No estás en este grupo.", ephemeral=True)
+
+        await thread.remove_user(interaction.user)
+        await update_group_embed(thread)
+        await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
+
+    async def close_group(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        if interaction.user.id != self.creator_id:
+            return await interaction.followup.send("Solo el creador del grupo puede cerrarlo.", ephemeral=True)
+
+        thread = await self._get_thread(interaction)
+        if not thread:
+            return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
+        if thread.locked:
+            return await interaction.followup.send("Este grupo ya estaba cerrado.", ephemeral=True)
+
+        await thread.edit(locked=True)
+        await update_group_embed(thread)
+        await interaction.followup.send("🔒 Grupo cerrado. Ya no se admite gente nueva.", ephemeral=True)
+
 async def perform_search_game(interaction: discord.Interaction, primary: dict):
     """Lógica de 'Buscar partida': cooldown, detección de lane y publicación
     en el canal del tier propio, mencionando a los roles de toda la ventana
@@ -266,7 +438,7 @@ async def perform_search_game(interaction: discord.Interaction, primary: dict):
     embed = build_search_embed(get_lane_display(lane_role), solo_display, flex_display)
 
     try:
-        await channel.send(
+        sent_message = await channel.send(
             content=f"{' '.join(role_mentions)} {interaction.user.mention} está buscando partida",
             embed=embed,
             allowed_mentions=discord.AllowedMentions(roles=True, users=True)
@@ -278,6 +450,34 @@ async def perform_search_game(interaction: discord.Interaction, primary: dict):
         )
 
     SEARCH_COOLDOWNS[uid] = now
+
+    # Hilo privado para que el grupo se comunique sin MD, con sus botones de
+    # Unirse / Salir / Cerrar grupo. Si por lo que sea falla la creación
+    # (permisos, etc.), seguimos adelante sin grupo — el aviso ya se mandó.
+    try:
+        thread = await channel.create_thread(
+            name=f"Grupo de {interaction.user.display_name}",
+            type=discord.ChannelType.private_thread,
+            auto_archive_duration=GROUP_THREAD_ARCHIVE_MINUTES,
+            invitable=False
+        )
+        await thread.add_user(interaction.user)
+
+        create_group(thread.id, sent_message.id, channel.id, interaction.user.id,
+                      discord.utils.utcnow().isoformat())
+
+        view = GroupView(thread.id, interaction.user.id)
+        bot.add_view(view)
+        await sent_message.edit(view=view)
+        await update_group_embed(thread)  # título → "Grupo Abierto" + te añade a ti a la lista
+
+        await thread.send(
+            f"🔒 Este es tu hilo privado, {interaction.user.mention}. Habla aquí con quien se una "
+            f"al grupo. Se eliminará automáticamente pasadas {GROUP_LIFETIME_HOURS}h."
+        )
+    except discord.HTTPException as e:
+        print(f"[GRUPO] No se pudo crear el hilo para {interaction.user}: {e}")
+
     await interaction.followup.send(
         f"✅ Aviso publicado en {channel.mention}. ¡Suerte encontrando partida!",
         ephemeral=True
@@ -529,6 +729,12 @@ class Panel(View):
 
         await interaction.followup.send("🔄 Datos actualizados correctamente.", ephemeral=True)
 
+# ------------------ PANEL DE BUSCAR PARTIDA (independiente) ------------------
+
+class SearchPanel(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
     @discord.ui.button(label="Buscar partida", emoji="🔎", style=discord.ButtonStyle.primary, custom_id="panel_search_game")
     async def search_game(self, interaction, _):
         uid = str(interaction.user.id)
@@ -596,8 +802,8 @@ async def deploy_panel():
             "Gestiona tus cuentas de **League of Legends** y encuentra gente con la que jugar.\n\n"
             "🔹 **Vincular cuenta:** Añade tu cuenta de League of Legends\n"
             "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
-            "🔹 **Actualizar datos:** Refresca tu rango automáticamente\n"
-            "🔸 **Buscar partida:** Avisa en los canales de tu rango que buscas partida"
+            "🔹 **Actualizar datos:** Refresca tu rango automáticamente\n\n"
+            f"🔎 Para buscar partida, usa <#{SEARCH_PANEL_CHANNEL_ID}>"
         ),
         color=0x9146FF
     )
@@ -605,6 +811,24 @@ async def deploy_panel():
     embed.set_footer(text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!",
                      icon_url=bot.user.display_avatar.url)
     await channel.send(embed=embed, view=Panel())
+
+async def deploy_search_panel():
+    channel = bot.get_channel(SEARCH_PANEL_CHANNEL_ID)
+    if not channel:
+        print(f"❌ No se encontró el canal con ID {SEARCH_PANEL_CHANNEL_ID}")
+        return
+    await channel.purge(limit=5)
+    embed = discord.Embed(
+        title="🔎 Buscar partida",
+        description=(
+            "Pulsa el botón para avisar en tu canal de rango que buscas gente con quien jugar.\n\n"
+            "Si todavía no has vinculado tu cuenta de **League of Legends**, se te pedirá "
+            "hacerlo primero — en cuanto termines, la búsqueda se publica automáticamente."
+        ),
+        color=0x2ECC71
+    )
+    embed.set_footer(text="Cooldown: una búsqueda cada 10 minutos")
+    await channel.send(embed=embed, view=SearchPanel())
 
 # ------------------ NUEVO MIEMBRO ------------------
 
@@ -902,6 +1126,52 @@ async def online(interaction: discord.Interaction):
 
     await interaction.followup.send(embed=embed)
 
+# ------------------ LIMPIEZA DE GRUPOS CADUCADOS ------------------
+
+async def reregister_group_views():
+    """Al arrancar: vuelve a registrar los botones de todos los grupos que
+    seguían activos en la DB, para que sigan funcionando tras el reinicio."""
+    for group in get_all_groups():
+        view = GroupView(int(group["thread_id"]), int(group["creator_id"]))
+        bot.add_view(view)
+
+@tasks.loop(minutes=30)
+async def cleanup_groups_loop():
+    print("🧹 Comprobando grupos caducados...")
+    now = discord.utils.utcnow()
+
+    for group in get_all_groups():
+        created_at = datetime.fromisoformat(group["created_at"])
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if now - created_at < timedelta(hours=GROUP_LIFETIME_HOURS):
+            continue
+
+        thread = bot.get_channel(int(group["thread_id"]))
+        if not thread:
+            try:
+                thread = await bot.fetch_channel(int(group["thread_id"]))
+            except discord.HTTPException:
+                thread = None
+        if thread:
+            try:
+                await thread.delete()
+            except discord.HTTPException:
+                pass
+
+        channel = bot.get_channel(int(group["channel_id"]))
+        if channel:
+            try:
+                message = await channel.fetch_message(int(group["message_id"]))
+                await message.delete()
+            except discord.HTTPException:
+                pass
+
+        delete_group(group["thread_id"])
+        await asyncio.sleep(0.3)
+
+    print("✅ Grupos comprobados.")
+
 # ------------------ ÚLTIMOS EN LLEGAR ------------------
 
 @bot.tree.command(
@@ -1102,6 +1372,7 @@ async def on_ready():
     # (owner_id, puuid), así que NO se registra aquí para evitar que un
     # reinicio reenganche interacciones reales a una instancia con datos falsos.
     bot.add_view(Panel())
+    bot.add_view(SearchPanel())
 
     # ---------- REGISTRO DE COMANDOS SLASH ----------
     # Copiamos los comandos globales a cada guild para que estén disponibles al instante.
@@ -1111,6 +1382,7 @@ async def on_ready():
         print(f"🟢 [SYNC] {guild.name}: {[cmd.name for cmd in synced]}")
 
     await deploy_panel()
+    await deploy_search_panel()
 
     if not update_ranks_loop.is_running():
         update_ranks_loop.start()
@@ -1122,6 +1394,11 @@ async def on_ready():
     await backfill_unlinked_tracking()
     if not check_unlinked_reminders_loop.is_running():
         check_unlinked_reminders_loop.start()
+
+    # ---------- GRUPOS DE BUSCAR PARTIDA ----------
+    await reregister_group_views()
+    if not cleanup_groups_loop.is_running():
+        cleanup_groups_loop.start()
 
     print("🤖 Bot listo")
     
