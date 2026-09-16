@@ -19,6 +19,15 @@ UNLINKED_ROLE_ID = 1547926475657969724
 # 📌 Canal donde se registran los recordatorios de vinculación (24h/72h)
 REMINDER_LOG_CHANNEL_ID = 1549497413675524287
 
+# 📌 Canal donde vive el panel independiente de "Buscar partida"
+SEARCH_PANEL_CHANNEL_ID = 1549695096239169646
+
+# 📌 Grupos de "Buscar partida": vida máxima del hilo/grupo antes de
+# borrarse automáticamente, y minutos de inactividad tras los que Discord
+# archiva el hilo (no lo borra, solo lo saca de la vista activa).
+GROUP_LIFETIME_HOURS = 3
+GROUP_THREAD_ARCHIVE_MINUTES = 60
+
 
 REGIONS = {
     "EUW": ("euw1", "europe", 1547292715270807593),
@@ -83,15 +92,15 @@ TIER_CHANNELS = {
 # tiene tier superior.
 TIER_SEARCH_WINDOWS = {
     "UNRANKED": ["UNRANKED"],
-    "IRON": ["IRON", "BRONZE"],
-    "BRONZE": ["IRON", "BRONZE", "SILVER"],
-    "SILVER": ["BRONZE", "SILVER", "GOLD"],
-    "GOLD": ["SILVER", "GOLD", "PLATINUM"],
-    "PLATINUM": ["GOLD", "PLATINUM", "EMERALD"],
-    "EMERALD": ["PLATINUM", "EMERALD", "DIAMOND"],
-    "DIAMOND": ["EMERALD", "DIAMOND", "MASTER"],
-    "MASTER": ["DIAMOND", "MASTER", "GRANDMASTER"],
-    "GRANDMASTER": ["MASTER", "GRANDMASTER", "CHALLENGER"],
+    "IRON": ["IRON"],
+    "BRONZE": ["IRON", "BRONZE"],
+    "SILVER": ["BRONZE", "SILVER"],
+    "GOLD": ["SILVER", "GOLD"],
+    "PLATINUM": ["GOLD", "PLATINUM"],
+    "EMERALD": ["PLATINUM", "EMERALD"],
+    "DIAMOND": ["EMERALD", "DIAMOND"],
+    "MASTER": ["DIAMOND", "MASTER"],
+    "GRANDMASTER": ["MASTER", "GRANDMASTER"],
     "CHALLENGER": ["GRANDMASTER", "CHALLENGER"],
 }
 
