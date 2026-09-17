@@ -367,7 +367,7 @@ class GroupView(View):
             return await interaction.followup.send("Ya estás en este grupo.", ephemeral=True)
 
         if thread.archived:
-            await thread.edit(archived=False)
+            thread = await thread.edit(archived=False)  # capturamos el objeto actualizado, por si acaso
         await thread.add_user(interaction.user)
 
         try:
@@ -433,7 +433,7 @@ class GroupView(View):
         """Bloquea el hilo, refresca el embed y deshabilita Unirse/Cerrar en
         el mensaje del canal. Compartido entre el cierre manual y el cierre
         automático al llenarse el grupo."""
-        await thread.edit(locked=True)
+        thread = await thread.edit(locked=True)  # capturamos el objeto actualizado, no el viejo
         await update_group_embed(thread)
         self._set_disabled_for_closed(True)
         if interaction.message:
