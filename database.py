@@ -29,7 +29,8 @@ def init_db():
             message_id TEXT NOT NULL,
             channel_id TEXT NOT NULL,
             creator_id TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            warned INTEGER NOT NULL DEFAULT 0
         )
         """)
 
@@ -129,25 +130,30 @@ def get_group(thread_id):
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT thread_id, message_id, channel_id, creator_id, created_at "
+            "SELECT thread_id, message_id, channel_id, creator_id, created_at, warned "
             "FROM active_groups WHERE thread_id=?", (str(thread_id),)
         )
         row = cur.fetchone()
     if not row:
         return None
     return {"thread_id": row[0], "message_id": row[1], "channel_id": row[2],
-            "creator_id": row[3], "created_at": row[4]}
+            "creator_id": row[3], "created_at": row[4], "warned": bool(row[5])}
 
 def get_all_groups():
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT thread_id, message_id, channel_id, creator_id, created_at FROM active_groups")
+        cur.execute("SELECT thread_id, message_id, channel_id, creator_id, created_at, warned FROM active_groups")
         rows = cur.fetchall()
     return [
-        {"thread_id": tid, "message_id": mid, "channel_id": cid, "creator_id": crid, "created_at": ca}
-        for tid, mid, cid, crid, ca in rows
+        {"thread_id": tid, "message_id": mid, "channel_id": cid, "creator_id": crid,
+         "created_at": ca, "warned": bool(w)}
+        for tid, mid, cid, crid, ca, w in rows
     ]
 
 def delete_group(thread_id):
     with get_conn() as conn:
         conn.execute("DELETE FROM active_groups WHERE thread_id=?", (str(thread_id),))
+
+def mark_group_warned(thread_id):
+    with get_conn() as conn:
+        conn.execute("UPDATE active_groups SET warned=1 WHERE thread_id=?", (str(thread_id),))
