@@ -27,6 +27,8 @@ SEARCH_PANEL_CHANNEL_ID = 1549695096239169646
 # archiva el hilo (no lo borra, solo lo saca de la vista activa).
 GROUP_LIFETIME_HOURS = 3
 GROUP_THREAD_ARCHIVE_MINUTES = 60
+GROUP_MAX_MEMBERS = 5          # se cierra solo al llegar a este número
+GROUP_WARNING_MINUTES = 15     # aviso sin menciones esto antes de borrarse
 
 
 REGIONS = {
