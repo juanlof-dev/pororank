@@ -16,7 +16,7 @@ from database import (
     load_data, save_data, init_db,
     has_linked_before, get_unlinked_tracking, get_all_unlinked_tracking,
     start_unlinked_tracking, stop_unlinked_tracking, mark_reminder_sent,
-    create_group, get_group, get_all_groups, delete_group,
+    create_group, get_group, get_all_groups, delete_group, mark_group_warned,
 )
 
 # ------------------ BOT ------------------
@@ -339,10 +339,32 @@ class GroupView(View):
         if thread.archived:
             await thread.edit(archived=False)
         await thread.add_user(interaction.user)
-        await update_group_embed(thread)
-        await interaction.followup.send(
-            f"✅ Te has unido al grupo. Habla con ellos en {thread.mention}.", ephemeral=True
-        )
+
+        try:
+            members_after = await thread.fetch_members()
+        except discord.HTTPException:
+            members_after = []
+
+        if len(members_after) >= GROUP_MAX_MEMBERS:
+            # Equipo completo: se cierra solo, misma lógica que "Cerrar grupo".
+            await self._lock_group(thread, interaction)
+            try:
+                await thread.send(
+                    "👥 El grupo ha llegado a su tamaño completo y se ha cerrado "
+                    "automáticamente. Ya no se admite gente nueva.",
+                    allowed_mentions=discord.AllowedMentions.none()
+                )
+            except discord.HTTPException:
+                pass
+            await interaction.followup.send(
+                f"✅ Te has unido al grupo — ¡equipo completo! Habla con ellos en {thread.mention}.",
+                ephemeral=True
+            )
+        else:
+            await update_group_embed(thread)
+            await interaction.followup.send(
+                f"✅ Te has unido al grupo. Habla con ellos en {thread.mention}.", ephemeral=True
+            )
 
     async def leave(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -368,6 +390,28 @@ class GroupView(View):
         await update_group_embed(thread)
         await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
 
+    def _set_disabled_for_closed(self, disabled: bool):
+        """Deshabilita Unirse y Cerrar (Salir se deja siempre activo, para
+        que quien ya esté dentro pueda irse aunque el grupo esté cerrado)."""
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.custom_id and (
+                child.custom_id.startswith("group_join:") or child.custom_id.startswith("group_close:")
+            ):
+                child.disabled = disabled
+
+    async def _lock_group(self, thread: discord.Thread, interaction: discord.Interaction):
+        """Bloquea el hilo, refresca el embed y deshabilita Unirse/Cerrar en
+        el mensaje del canal. Compartido entre el cierre manual y el cierre
+        automático al llenarse el grupo."""
+        await thread.edit(locked=True)
+        await update_group_embed(thread)
+        self._set_disabled_for_closed(True)
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
     async def close_group(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
@@ -380,8 +424,7 @@ class GroupView(View):
         if thread.locked:
             return await interaction.followup.send("Este grupo ya estaba cerrado.", ephemeral=True)
 
-        await thread.edit(locked=True)
-        await update_group_embed(thread)
+        await self._lock_group(thread, interaction)
         await interaction.followup.send("🔒 Grupo cerrado. Ya no se admite gente nueva.", ephemeral=True)
 
 async def perform_search_game(interaction: discord.Interaction, primary: dict):
@@ -1130,44 +1173,82 @@ async def online(interaction: discord.Interaction):
 
 async def reregister_group_views():
     """Al arrancar: vuelve a registrar los botones de todos los grupos que
-    seguían activos en la DB, para que sigan funcionando tras el reinicio."""
+    seguían activos en la DB, para que sigan funcionando tras el reinicio.
+    Comprueba el estado real del hilo (bloqueado o no) para que, si el
+    grupo ya estaba cerrado antes de reiniciar, la vista recreada sepa que
+    Unirse/Cerrar deben nacer deshabilitados — evita que una futura edición
+    del mensaje los reactive por accidente."""
     for group in get_all_groups():
-        view = GroupView(int(group["thread_id"]), int(group["creator_id"]))
+        thread_id = int(group["thread_id"])
+        view = GroupView(thread_id, int(group["creator_id"]))
+
+        thread = bot.get_channel(thread_id)
+        if not thread:
+            try:
+                thread = await bot.fetch_channel(thread_id)
+            except discord.HTTPException:
+                thread = None
+
+        if thread and thread.locked:
+            view._set_disabled_for_closed(True)
+
         bot.add_view(view)
 
-@tasks.loop(minutes=30)
+@tasks.loop(minutes=10)
 async def cleanup_groups_loop():
+    """Cada 10 min (no cada 30: con una ventana de aviso de 15 min, un
+    intervalo de 30 podría saltársela por completo y borrar sin avisar)."""
     print("🧹 Comprobando grupos caducados...")
     now = discord.utils.utcnow()
+    warn_threshold = timedelta(hours=GROUP_LIFETIME_HOURS) - timedelta(minutes=GROUP_WARNING_MINUTES)
 
     for group in get_all_groups():
         created_at = datetime.fromisoformat(group["created_at"])
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
-        if now - created_at < timedelta(hours=GROUP_LIFETIME_HOURS):
-            continue
+        elapsed = now - created_at
 
-        thread = bot.get_channel(int(group["thread_id"]))
-        if not thread:
-            try:
-                thread = await bot.fetch_channel(int(group["thread_id"]))
-            except discord.HTTPException:
-                thread = None
-        if thread:
-            try:
-                await thread.delete()
-            except discord.HTTPException:
-                pass
+        if elapsed >= timedelta(hours=GROUP_LIFETIME_HOURS):
+            thread = bot.get_channel(int(group["thread_id"]))
+            if not thread:
+                try:
+                    thread = await bot.fetch_channel(int(group["thread_id"]))
+                except discord.HTTPException:
+                    thread = None
+            if thread:
+                try:
+                    await thread.delete()
+                except discord.HTTPException:
+                    pass
 
-        channel = bot.get_channel(int(group["channel_id"]))
-        if channel:
-            try:
-                message = await channel.fetch_message(int(group["message_id"]))
-                await message.delete()
-            except discord.HTTPException:
-                pass
+            channel = bot.get_channel(int(group["channel_id"]))
+            if channel:
+                try:
+                    message = await channel.fetch_message(int(group["message_id"]))
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
 
-        delete_group(group["thread_id"])
+            delete_group(group["thread_id"])
+
+        elif elapsed >= warn_threshold and not group["warned"]:
+            thread = bot.get_channel(int(group["thread_id"]))
+            if not thread:
+                try:
+                    thread = await bot.fetch_channel(int(group["thread_id"]))
+                except discord.HTTPException:
+                    thread = None
+            if thread:
+                try:
+                    await thread.send(
+                        f"⏳ Este grupo se eliminará automáticamente en unos {GROUP_WARNING_MINUTES} "
+                        "minutos para evitar saturar el servidor.",
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+                except discord.HTTPException:
+                    pass
+            mark_group_warned(group["thread_id"])
+
         await asyncio.sleep(0.3)
 
     print("✅ Grupos comprobados.")
