@@ -420,25 +420,18 @@ class GroupView(View):
         await update_group_embed(thread)
         await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
 
-    def _set_disabled_for_closed(self, disabled: bool):
-        """Deshabilita Unirse y Cerrar (Salir se deja siempre activo, para
-        que quien ya esté dentro pueda irse aunque el grupo esté cerrado)."""
-        for child in self.children:
-            if isinstance(child, discord.ui.Button) and child.custom_id and (
-                child.custom_id.startswith("group_join:") or child.custom_id.startswith("group_close:")
-            ):
-                child.disabled = disabled
-
     async def _lock_group(self, thread: discord.Thread, interaction: discord.Interaction):
-        """Bloquea el hilo, refresca el embed y deshabilita Unirse/Cerrar en
-        el mensaje del canal. Compartido entre el cierre manual y el cierre
-        automático al llenarse el grupo."""
+        """Bloquea el hilo, refresca el embed y QUITA los botones del
+        mensaje del canal por completo (no solo deshabilitarlos). Quien ya
+        esté dentro del hilo siempre puede abandonarlo de forma nativa desde
+        Discord, así que no hace falta mantener un botón de Salir aquí.
+        Compartido entre el cierre manual y el cierre automático al
+        llenarse el grupo."""
         thread = await thread.edit(locked=True)  # capturamos el objeto actualizado, no el viejo
         await update_group_embed(thread)
-        self._set_disabled_for_closed(True)
         if interaction.message:
             try:
-                await interaction.message.edit(view=self)
+                await interaction.message.edit(view=None)
             except discord.HTTPException:
                 pass
 
@@ -1228,13 +1221,10 @@ async def online(interaction: discord.Interaction):
 async def reregister_group_views():
     """Al arrancar: vuelve a registrar los botones de todos los grupos que
     seguían activos en la DB, para que sigan funcionando tras el reinicio.
-    Comprueba el estado real del hilo (bloqueado o no) para que, si el
-    grupo ya estaba cerrado antes de reiniciar, la vista recreada sepa que
-    Unirse/Cerrar deben nacer deshabilitados — evita que una futura edición
-    del mensaje los reactive por accidente."""
+    Si el grupo ya estaba cerrado antes de reiniciar, el mensaje ya se
+    quedó sin botones al cerrarse — no hay nada que volver a registrar."""
     for group in get_all_groups():
         thread_id = int(group["thread_id"])
-        view = GroupView(thread_id, int(group["creator_id"]))
 
         thread = bot.get_channel(thread_id)
         if not thread:
@@ -1244,8 +1234,9 @@ async def reregister_group_views():
                 thread = None
 
         if thread and thread.locked:
-            view._set_disabled_for_closed(True)
+            continue
 
+        view = GroupView(thread_id, int(group["creator_id"]))
         bot.add_view(view)
 
 @tasks.loop(minutes=10)
