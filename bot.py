@@ -177,6 +177,38 @@ def get_member_lane_role(member):
             return role
     return None
 
+def get_member_tier_from_roles(member, role_map):
+    """Deduce un tier (SoloQ o FlexQ) a partir de qué rol de ese mapa tiene
+    el miembro ahora mismo — funciona igual si el rol se lo asignó nuestro
+    bot o cualquier otro (p.ej. Orianna Bot, que usa los mismos roles)."""
+    member_role_ids = {r.id for r in member.roles}
+    for tier, role_id in role_map.items():
+        if role_id in member_role_ids:
+            return tier
+    return None
+
+def get_effective_primary(user_id: str, member: discord.Member):
+    """Cuenta 'principal' para Buscar partida / unirse a un grupo. Preferimos
+    los datos reales de nuestra DB (con puuid/riot_id, necesarios para Ver
+    cuentas y Actualizar datos). Si no hay cuenta en nuestra DB pero la
+    persona ya tiene puesto un rol de rango (p.ej. vinculada por Orianna Bot,
+    que usa los mismos roles que nosotros), deducimos el tier directamente
+    de sus roles — así puede usar Buscar partida sin haber pasado por
+    nuestro flujo. Esta cuenta 'derivada' NO sirve para Ver cuentas ni
+    Actualizar datos, que sí necesitan el puuid real."""
+    data = load_data()
+    accounts = data.get(user_id)
+    primary = next((a for a in accounts if a["primary"]), None) if accounts else None
+    if primary:
+        return primary
+
+    solo_tier = get_member_tier_from_roles(member, SOLO_ROLES)
+    if not solo_tier:
+        return None
+
+    flex_tier = get_member_tier_from_roles(member, FLEX_ROLES) or "UNRANKED"
+    return {"solo": solo_tier, "flex": flex_tier, "riot_id": None, "puuid": None, "region": None}
+
 def format_tier_display(tier_code):
     """Emoji + nombre en español de un tier, p.ej. '<:Oro:...> Oro'."""
     emoji = TIER_EMOJIS.get(tier_code, "")
@@ -207,7 +239,7 @@ def humanize_delta(delta):
     return f"hace {days} días"
 
 def build_search_embed(lane_name, solo_name, flex_name):
-    embed = discord.Embed(title="🔎 Buscando partida", color=0x2ECC71)
+    embed = discord.Embed(title="🟢 Grupo Abierto", color=0x2ECC71)
     embed.add_field(name="Rol principal", value=lane_name, inline=True)
     embed.add_field(name="Elo SoloQ", value=solo_name, inline=True)
     embed.add_field(name="Elo FlexQ", value=flex_name, inline=True)
@@ -250,7 +282,7 @@ async def update_group_embed(thread: discord.Thread):
         lines.append(f"{member.display_name} · {lane_display}")
 
     embed = discord.Embed.from_dict(message.embeds[0].to_dict()) if message.embeds else discord.Embed()
-    embed.title = "🔒 Grupo Cerrado" if thread.locked else "🟢 Grupo Abierto"
+    embed.title = "🔴 Grupo Cerrado" if thread.locked else "🟢 Grupo Abierto"
     embed.color = 0xE74C3C if thread.locked else 0x2ECC71
 
     # Quitamos cualquier campo "Miembros" de una actualización anterior para
@@ -313,9 +345,7 @@ class GroupView(View):
         await interaction.response.defer(ephemeral=True)
 
         uid = str(interaction.user.id)
-        data = load_data()
-        accounts = data.get(uid)
-        primary = next((a for a in accounts if a["primary"]), None) if accounts else None
+        primary = get_effective_primary(uid, interaction.user)
         if not primary:
             return await interaction.followup.send(
                 "❌ Necesitas tener una cuenta vinculada para unirte a un grupo.", ephemeral=True
@@ -781,16 +811,14 @@ class SearchPanel(View):
     @discord.ui.button(label="Buscar partida", emoji="🔎", style=discord.ButtonStyle.primary, custom_id="panel_search_game")
     async def search_game(self, interaction, _):
         uid = str(interaction.user.id)
-        data = load_data()
-        accounts = data.get(uid)
-        primary = next((a for a in accounts if a["primary"]), None) if accounts else None
+        primary = get_effective_primary(uid, interaction.user)
 
         if not primary:
-            # Sin cuenta vinculada: le abrimos directamente el modal de
-            # "Vincular cuenta" (send_modal debe ser la PRIMERA respuesta a
-            # la interacción, así que esto va antes del defer()). Marcamos
-            # la intención para que, al terminar de vincular, se le lance
-            # la búsqueda automáticamente y no tenga que volver a pulsar.
+            # Ni cuenta en nuestra DB ni rol de rango puesto por nadie: le
+            # abrimos el modal de "Vincular cuenta" (send_modal debe ser la
+            # PRIMERA respuesta a la interacción, así que esto va antes del
+            # defer()). Marcamos la intención para que, al terminar de
+            # vincular, se le lance la búsqueda automáticamente.
             SEARCH_INTENT.add(uid)
             return await interaction.response.send_modal(LinkModal())
 
@@ -902,6 +930,32 @@ async def on_member_remove(member: discord.Member):
     seguimiento de recordatorios (y evita mandarle un MD a quien ya no
     compartimos servidor)."""
     stop_unlinked_tracking(str(member.id))
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Detecta cuando alguien recibe un rol de rango de SoloQ sin haber
+    pasado por nuestro flujo — típicamente porque lo vinculó con Orianna
+    Bot, que usa los mismos roles que nosotros. En ese caso: le quitamos
+    'Sin vincular' (no puede tener ambos a la vez) y paramos sus
+    recordatorios automáticos, porque claramente no es alguien que no sepa
+    cómo funciona el sistema."""
+    if before.roles == after.roles:
+        return  # nada de roles cambió, no hay nada que comprobar
+
+    after_ids = {r.id for r in after.roles}
+    if UNLINKED_ROLE_ID not in after_ids:
+        return  # ya no tiene "Sin vincular" (lo habrá gestionado nuestro propio flujo)
+
+    if not any(role_id in after_ids for role_id in SOLO_ROLES.values()):
+        return  # sigue sin ningún rol de rango, nada que arreglar
+
+    unlinked_role = after.guild.get_role(UNLINKED_ROLE_ID)
+    if unlinked_role:
+        try:
+            await after.remove_roles(unlinked_role)
+        except discord.HTTPException:
+            pass
+    stop_unlinked_tracking(str(after.id))
 
 # ------------------ SINCRONIZACIÓN MANUAL ------------------
 
