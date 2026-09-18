@@ -377,15 +377,15 @@ class GroupView(View):
 
         if len(members_after) >= GROUP_MAX_MEMBERS:
             # Equipo completo: se cierra solo, misma lógica que "Cerrar grupo".
-            await self._lock_group(thread, interaction)
-            try:
-                await thread.send(
-                    "👥 El grupo ha llegado a su tamaño completo y se ha cerrado "
-                    "automáticamente. Ya no se admite gente nueva.",
-                    allowed_mentions=discord.AllowedMentions.none()
-                )
-            except discord.HTTPException:
-                pass
+            if await self._lock_group(thread, interaction):
+                try:
+                    await thread.send(
+                        "👥 El grupo ha llegado a su tamaño completo y se ha cerrado "
+                        "automáticamente. Ya no se admite gente nueva.",
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+                except discord.HTTPException:
+                    pass
             await interaction.followup.send(
                 f"✅ Te has unido al grupo — ¡equipo completo! Habla con ellos en {thread.mention}.",
                 ephemeral=True
@@ -420,20 +420,36 @@ class GroupView(View):
         await update_group_embed(thread)
         await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
 
-    async def _lock_group(self, thread: discord.Thread, interaction: discord.Interaction):
+    async def _lock_group(self, thread: discord.Thread, interaction: discord.Interaction) -> bool:
         """Bloquea el hilo, refresca el embed y QUITA los botones del
         mensaje del canal por completo (no solo deshabilitarlos). Quien ya
         esté dentro del hilo siempre puede abandonarlo de forma nativa desde
         Discord, así que no hace falta mantener un botón de Salir aquí.
         Compartido entre el cierre manual y el cierre automático al
-        llenarse el grupo."""
-        thread = await thread.edit(locked=True)  # capturamos el objeto actualizado, no el viejo
+        llenarse el grupo. Devuelve True si se pudo bloquear, False si
+        falló (y ya se avisó al usuario del motivo)."""
+        try:
+            thread = await thread.edit(locked=True)  # capturamos el objeto actualizado, no el viejo
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ No tengo permiso de **Gestionar hilos** en este canal, así que no puedo "
+                "cerrar el grupo. Avisa a un administrador para que me lo dé.",
+                ephemeral=True
+            )
+            return False
+        except discord.HTTPException as e:
+            await interaction.followup.send(
+                f"❌ No se pudo cerrar el grupo (error de Discord: {e.status}).", ephemeral=True
+            )
+            return False
+
         await update_group_embed(thread)
         if interaction.message:
             try:
                 await interaction.message.edit(view=None)
             except discord.HTTPException:
                 pass
+        return True
 
     async def close_group(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -447,7 +463,8 @@ class GroupView(View):
         if thread.locked:
             return await interaction.followup.send("Este grupo ya estaba cerrado.", ephemeral=True)
 
-        await self._lock_group(thread, interaction)
+        if not await self._lock_group(thread, interaction):
+            return  # _lock_group ya avisó del motivo del fallo
         await interaction.followup.send("🔒 Grupo cerrado. Ya no se admite gente nueva.", ephemeral=True)
 
 async def perform_search_game(interaction: discord.Interaction, primary: dict):
