@@ -343,82 +343,94 @@ class GroupView(View):
 
     async def join(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-
-        uid = str(interaction.user.id)
-        primary = get_effective_primary(uid, interaction.user)
-        if not primary:
-            return await interaction.followup.send(
-                "❌ Necesitas tener una cuenta vinculada para unirte a un grupo.", ephemeral=True
-            )
-
-        thread = await self._get_thread(interaction)
-        if not thread:
-            return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
-        if thread.locked:
-            return await interaction.followup.send(
-                "🔒 Este grupo está cerrado, no admite más gente.", ephemeral=True
-            )
-
         try:
-            members = await thread.fetch_members()
-        except discord.HTTPException:
-            members = []
-        if interaction.user.id in [m.id for m in members]:
-            return await interaction.followup.send("Ya estás en este grupo.", ephemeral=True)
+            uid = str(interaction.user.id)
+            primary = get_effective_primary(uid, interaction.user)
+            if not primary:
+                return await interaction.followup.send(
+                    "❌ Necesitas tener una cuenta vinculada para unirte a un grupo.", ephemeral=True
+                )
 
-        if thread.archived:
-            thread = await thread.edit(archived=False)  # capturamos el objeto actualizado, por si acaso
-        await thread.add_user(interaction.user)
+            thread = await self._get_thread(interaction)
+            if not thread:
+                return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
+            if thread.locked:
+                return await interaction.followup.send(
+                    "🔒 Este grupo está cerrado, no admite más gente.", ephemeral=True
+                )
 
-        try:
-            members_after = await thread.fetch_members()
-        except discord.HTTPException:
-            members_after = []
+            try:
+                members = await thread.fetch_members()
+            except discord.HTTPException:
+                members = []
+            if interaction.user.id in [m.id for m in members]:
+                return await interaction.followup.send("Ya estás en este grupo.", ephemeral=True)
 
-        if len(members_after) >= GROUP_MAX_MEMBERS:
-            # Equipo completo: se cierra solo, misma lógica que "Cerrar grupo".
-            if await self._lock_group(thread, interaction):
-                try:
-                    await thread.send(
-                        "👥 El grupo ha llegado a su tamaño completo y se ha cerrado "
-                        "automáticamente. Ya no se admite gente nueva.",
-                        allowed_mentions=discord.AllowedMentions.none()
-                    )
-                except discord.HTTPException:
-                    pass
+            if thread.archived:
+                thread = await thread.edit(archived=False)  # capturamos el objeto actualizado, por si acaso
+            await thread.add_user(interaction.user)
+
+            try:
+                members_after = await thread.fetch_members()
+            except discord.HTTPException:
+                members_after = []
+
+            if len(members_after) >= GROUP_MAX_MEMBERS:
+                # Equipo completo: se cierra solo, misma lógica que "Cerrar grupo".
+                if await self._lock_group(thread, interaction):
+                    try:
+                        await thread.send(
+                            "👥 El grupo ha llegado a su tamaño completo y se ha cerrado "
+                            "automáticamente. Ya no se admite gente nueva.",
+                            allowed_mentions=discord.AllowedMentions.none()
+                        )
+                    except discord.HTTPException:
+                        pass
+                await interaction.followup.send(
+                    f"✅ Te has unido al grupo — ¡equipo completo! Habla con ellos en {thread.mention}.",
+                    ephemeral=True
+                )
+            else:
+                await update_group_embed(thread)
+                await interaction.followup.send(
+                    f"✅ Te has unido al grupo. Habla con ellos en {thread.mention}.", ephemeral=True
+                )
+        except Exception as e:
+            print(f"[GRUPO] Error en 'Unirse': {type(e).__name__}: {e}")
             await interaction.followup.send(
-                f"✅ Te has unido al grupo — ¡equipo completo! Habla con ellos en {thread.mention}.",
+                f"❌ Ha ocurrido un error inesperado ({type(e).__name__}). Avisa a un administrador.",
                 ephemeral=True
-            )
-        else:
-            await update_group_embed(thread)
-            await interaction.followup.send(
-                f"✅ Te has unido al grupo. Habla con ellos en {thread.mention}.", ephemeral=True
             )
 
     async def leave(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        try:
+            if interaction.user.id == self.creator_id:
+                return await interaction.followup.send(
+                    "Eres el creador del grupo — usa **Cerrar grupo** si quieres dejar de admitir gente.",
+                    ephemeral=True
+                )
 
-        if interaction.user.id == self.creator_id:
-            return await interaction.followup.send(
-                "Eres el creador del grupo — usa **Cerrar grupo** si quieres dejar de admitir gente.",
+            thread = await self._get_thread(interaction)
+            if not thread:
+                return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
+
+            try:
+                members = await thread.fetch_members()
+            except discord.HTTPException:
+                members = []
+            if interaction.user.id not in [m.id for m in members]:
+                return await interaction.followup.send("No estás en este grupo.", ephemeral=True)
+
+            await thread.remove_user(interaction.user)
+            await update_group_embed(thread)
+            await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
+        except Exception as e:
+            print(f"[GRUPO] Error en 'Salir': {type(e).__name__}: {e}")
+            await interaction.followup.send(
+                f"❌ Ha ocurrido un error inesperado ({type(e).__name__}). Avisa a un administrador.",
                 ephemeral=True
             )
-
-        thread = await self._get_thread(interaction)
-        if not thread:
-            return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
-
-        try:
-            members = await thread.fetch_members()
-        except discord.HTTPException:
-            members = []
-        if interaction.user.id not in [m.id for m in members]:
-            return await interaction.followup.send("No estás en este grupo.", ephemeral=True)
-
-        await thread.remove_user(interaction.user)
-        await update_group_embed(thread)
-        await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
 
     async def _lock_group(self, thread: discord.Thread, interaction: discord.Interaction) -> bool:
         """Bloquea el hilo, refresca el embed y QUITA los botones del
@@ -453,19 +465,25 @@ class GroupView(View):
 
     async def close_group(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        try:
+            if interaction.user.id != self.creator_id:
+                return await interaction.followup.send("Solo el creador del grupo puede cerrarlo.", ephemeral=True)
 
-        if interaction.user.id != self.creator_id:
-            return await interaction.followup.send("Solo el creador del grupo puede cerrarlo.", ephemeral=True)
+            thread = await self._get_thread(interaction)
+            if not thread:
+                return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
+            if thread.locked:
+                return await interaction.followup.send("Este grupo ya estaba cerrado.", ephemeral=True)
 
-        thread = await self._get_thread(interaction)
-        if not thread:
-            return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
-        if thread.locked:
-            return await interaction.followup.send("Este grupo ya estaba cerrado.", ephemeral=True)
-
-        if not await self._lock_group(thread, interaction):
-            return  # _lock_group ya avisó del motivo del fallo
-        await interaction.followup.send("🔒 Grupo cerrado. Ya no se admite gente nueva.", ephemeral=True)
+            if not await self._lock_group(thread, interaction):
+                return  # _lock_group ya avisó del motivo del fallo
+            await interaction.followup.send("🔒 Grupo cerrado. Ya no se admite gente nueva.", ephemeral=True)
+        except Exception as e:
+            print(f"[GRUPO] Error en 'Cerrar grupo': {type(e).__name__}: {e}")
+            await interaction.followup.send(
+                f"❌ Ha ocurrido un error inesperado ({type(e).__name__}). Avisa a un administrador.",
+                ephemeral=True
+            )
 
 async def perform_search_game(interaction: discord.Interaction, primary: dict):
     """Lógica de 'Buscar partida': cooldown, detección de lane y publicación
@@ -1235,85 +1253,131 @@ async def online(interaction: discord.Interaction):
 
 # ------------------ LIMPIEZA DE GRUPOS CADUCADOS ------------------
 
+async def close_group_silently(thread: discord.Thread, group: dict):
+    """Igual que GroupView._lock_group pero sin necesitar una interacción —
+    para el cierre automático por caducidad, antes de borrarlo. Si el
+    borrado falla luego (p.ej. por permisos), al menos el grupo se queda
+    visualmente cerrado en vez de "abierto para siempre"."""
+    if not thread.locked:
+        try:
+            thread = await thread.edit(locked=True)
+        except discord.HTTPException as e:
+            print(f"[GRUPO] No se pudo bloquear el hilo {thread.id} al caducar: {e}")
+
+    await update_group_embed(thread)
+
+    channel = bot.get_channel(int(group["channel_id"]))
+    if not channel:
+        try:
+            channel = await bot.fetch_channel(int(group["channel_id"]))
+        except discord.HTTPException:
+            channel = None
+    if channel:
+        try:
+            message = await channel.fetch_message(int(group["message_id"]))
+            await message.edit(view=None)
+        except discord.HTTPException:
+            pass
+
 async def reregister_group_views():
     """Al arrancar: vuelve a registrar los botones de todos los grupos que
     seguían activos en la DB, para que sigan funcionando tras el reinicio.
     Si el grupo ya estaba cerrado antes de reiniciar, el mensaje ya se
-    quedó sin botones al cerrarse — no hay nada que volver a registrar."""
+    quedó sin botones al cerrarse — no hay nada que volver a registrar.
+    Un fallo con UN grupo no debe impedir registrar el resto."""
     for group in get_all_groups():
-        thread_id = int(group["thread_id"])
+        try:
+            thread_id = int(group["thread_id"])
 
-        thread = bot.get_channel(thread_id)
-        if not thread:
-            try:
-                thread = await bot.fetch_channel(thread_id)
-            except discord.HTTPException:
-                thread = None
+            thread = bot.get_channel(thread_id)
+            if not thread:
+                try:
+                    thread = await bot.fetch_channel(thread_id)
+                except discord.HTTPException:
+                    thread = None
 
-        if thread and thread.locked:
-            continue
+            if thread and thread.locked:
+                continue
 
-        view = GroupView(thread_id, int(group["creator_id"]))
-        bot.add_view(view)
+            view = GroupView(thread_id, int(group["creator_id"]))
+            bot.add_view(view)
+        except Exception as e:
+            print(f"[GRUPO] Error re-registrando el grupo {group.get('thread_id')}: {type(e).__name__}: {e}")
 
 @tasks.loop(minutes=10)
 async def cleanup_groups_loop():
     """Cada 10 min (no cada 30: con una ventana de aviso de 15 min, un
-    intervalo de 30 podría saltársela por completo y borrar sin avisar)."""
+    intervalo de 30 podría saltársela por completo y borrar sin avisar).
+    Cada grupo se procesa en su propio try/except: si uno falla (datos
+    corruptos, permisos, lo que sea), no debe tirar abajo el resto de la
+    pasada NI parar la tarea completa para siempre."""
     print("🧹 Comprobando grupos caducados...")
     now = discord.utils.utcnow()
     warn_threshold = timedelta(hours=GROUP_LIFETIME_HOURS) - timedelta(minutes=GROUP_WARNING_MINUTES)
 
     for group in get_all_groups():
-        created_at = datetime.fromisoformat(group["created_at"])
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-        elapsed = now - created_at
+        try:
+            created_at = datetime.fromisoformat(group["created_at"])
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            elapsed = now - created_at
 
-        if elapsed >= timedelta(hours=GROUP_LIFETIME_HOURS):
-            thread = bot.get_channel(int(group["thread_id"]))
-            if not thread:
-                try:
-                    thread = await bot.fetch_channel(int(group["thread_id"]))
-                except discord.HTTPException:
-                    thread = None
-            if thread:
-                try:
-                    await thread.delete()
-                except discord.HTTPException:
-                    pass
+            if elapsed >= timedelta(hours=GROUP_LIFETIME_HOURS):
+                thread = bot.get_channel(int(group["thread_id"]))
+                if not thread:
+                    try:
+                        thread = await bot.fetch_channel(int(group["thread_id"]))
+                    except discord.HTTPException:
+                        thread = None
 
-            channel = bot.get_channel(int(group["channel_id"]))
-            if channel:
-                try:
-                    message = await channel.fetch_message(int(group["message_id"]))
-                    await message.delete()
-                except discord.HTTPException:
-                    pass
+                if thread:
+                    await close_group_silently(thread, group)
+                    try:
+                        await thread.delete()
+                    except discord.HTTPException:
+                        pass
 
-            delete_group(group["thread_id"])
+                channel = bot.get_channel(int(group["channel_id"]))
+                if channel:
+                    try:
+                        message = await channel.fetch_message(int(group["message_id"]))
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
 
-        elif elapsed >= warn_threshold and not group["warned"]:
-            thread = bot.get_channel(int(group["thread_id"]))
-            if not thread:
-                try:
-                    thread = await bot.fetch_channel(int(group["thread_id"]))
-                except discord.HTTPException:
-                    thread = None
-            if thread:
-                try:
-                    await thread.send(
-                        f"⏳ Este grupo se eliminará automáticamente en unos {GROUP_WARNING_MINUTES} "
-                        "minutos para evitar saturar el servidor.",
-                        allowed_mentions=discord.AllowedMentions.none()
-                    )
-                except discord.HTTPException:
-                    pass
-            mark_group_warned(group["thread_id"])
+                delete_group(group["thread_id"])
+
+            elif elapsed >= warn_threshold and not group["warned"]:
+                thread = bot.get_channel(int(group["thread_id"]))
+                if not thread:
+                    try:
+                        thread = await bot.fetch_channel(int(group["thread_id"]))
+                    except discord.HTTPException:
+                        thread = None
+                if thread:
+                    try:
+                        await thread.send(
+                            f"⏳ Este grupo se eliminará automáticamente en unos {GROUP_WARNING_MINUTES} "
+                            "minutos para evitar saturar el servidor.",
+                            allowed_mentions=discord.AllowedMentions.none()
+                        )
+                    except discord.HTTPException:
+                        pass
+                mark_group_warned(group["thread_id"])
+        except Exception as e:
+            print(f"[GRUPO] Error procesando el grupo {group.get('thread_id')} en la limpieza: "
+                  f"{type(e).__name__}: {e}")
 
         await asyncio.sleep(0.3)
 
     print("✅ Grupos comprobados.")
+
+@cleanup_groups_loop.error
+async def cleanup_groups_loop_error(error: BaseException):
+    """Red de seguridad final: si algo se escapa de los try/except de
+    arriba, lo dejamos en el log en vez de dejar que discord.py pare la
+    tarea para siempre en silencio."""
+    print(f"[GRUPO] cleanup_groups_loop se cayó con un error no controlado: {type(error).__name__}: {error}")
 
 # ------------------ ÚLTIMOS EN LLEGAR ------------------
 
@@ -1539,7 +1603,11 @@ async def on_ready():
         check_unlinked_reminders_loop.start()
 
     # ---------- GRUPOS DE BUSCAR PARTIDA ----------
-    await reregister_group_views()
+    try:
+        await reregister_group_views()
+    except Exception as e:
+        # Que un fallo aquí no impida arrancar la limpieza automática de abajo.
+        print(f"[GRUPO] Error en reregister_group_views: {type(e).__name__}: {e}")
     if not cleanup_groups_loop.is_running():
         cleanup_groups_loop.start()
 
