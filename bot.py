@@ -1331,17 +1331,12 @@ async def cleanup_groups_loop():
                         thread = None
 
                 if thread:
+                    # close_group_silently ya deja el embed en "🔴 Grupo
+                    # Cerrado" y sin botones — eso se queda en el canal como
+                    # histórico. Solo se borra el HILO, nunca el mensaje.
                     await close_group_silently(thread, group)
                     try:
                         await thread.delete()
-                    except discord.HTTPException:
-                        pass
-
-                channel = bot.get_channel(int(group["channel_id"]))
-                if channel:
-                    try:
-                        message = await channel.fetch_message(int(group["message_id"]))
-                        await message.delete()
                     except discord.HTTPException:
                         pass
 
