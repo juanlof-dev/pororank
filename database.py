@@ -34,6 +34,13 @@ def init_db():
         )
         """)
 
+        # Migración: si active_groups ya existía de un despliegue anterior a
+        # que añadiéramos 'warned', CREATE TABLE IF NOT EXISTS no la habría
+        # creado (la tabla ya existía). Lo comprobamos y la añadimos a mano.
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(active_groups)").fetchall()]
+        if "warned" not in cols:
+            conn.execute("ALTER TABLE active_groups ADD COLUMN warned INTEGER NOT NULL DEFAULT 0")
+
 def load_data():
     with get_conn() as conn:
         cur = conn.cursor()
