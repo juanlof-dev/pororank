@@ -22,6 +22,9 @@ REMINDER_LOG_CHANNEL_ID = 1549497413675524287
 # 📌 Canal donde vive el panel independiente de "Buscar partida"
 SEARCH_PANEL_CHANNEL_ID = 1549695096239169646
 
+# 📌 Canal al que se dirige a la gente cuando algo falla y hace falta un administrador
+ADMIN_CONTACT_CHANNEL_ID = 1547249710526373919
+
 # 📌 Grupos de "Buscar partida": vida máxima del hilo/grupo antes de
 # borrarse automáticamente, y minutos de inactividad tras los que Discord
 # archiva el hilo (no lo borra, solo lo saca de la vista activa).
