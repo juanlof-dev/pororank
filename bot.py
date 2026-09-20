@@ -27,6 +27,14 @@ intents.message_content = True  # necesario si en el futuro usas comandos con pr
 intents.presences = True  # necesario para /online (saber quién está conectado)
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ------------------ ESTILO ------------------
+# Paleta de colores compartida por todos los embeds del bot.
+COLOR_PANEL = 0x9B59B6        # 🟣 Morado — acciones principales / paneles
+COLOR_GROUP_OPEN = 0x2ECC71   # 🟢 Verde — búsqueda/grupo activo
+COLOR_GROUP_CLOSED = 0xE74C3C # 🔴 Rojo — cerrado/error
+COLOR_VERIFICATION = 0xF1C40F # 🟡 Dorado — verificación
+COLOR_ACCOUNT_INFO = 0x2C2F33 # ⚫ Oscuro — información de cuenta
+
 # ------------------ VERIFICACIÓN ------------------
 
 PENDING_VERIFICATIONS = {}
@@ -143,7 +151,7 @@ def verification_embed(name, tag):
                      "1️⃣ Abre el cliente de **League of Legends**\n"
                      "2️⃣ Cambia tu **icono de invocador** por el siguiente\n\n"
                      "Cuando lo hayas hecho, pulsa **He cambiado el icono**"),
-        color=0xF1C40F
+        color=COLOR_VERIFICATION
     )
     embed.set_thumbnail(
         url=f"https://raw.communitydragon.org/latest/plugins/"
@@ -158,7 +166,7 @@ def build_account_embed(acc, summoner):
         f"{summoner['profileIconId']}.jpg"
     )
     title = f"{'⭐ ' if acc['primary'] else ''}{acc['riot_id']} ({acc['region']})"
-    embed = discord.Embed(title=title, color=0x2B2D31)
+    embed = discord.Embed(title=title, color=COLOR_ACCOUNT_INFO)
     embed.set_thumbnail(url=icon_url)
     embed.add_field(name="", value=f"**Lvl {summoner['summonerLevel']}**", inline=False)
     solo_display = format_tier_display(acc["solo"])
@@ -238,18 +246,23 @@ def humanize_delta(delta):
         return "ayer"
     return f"hace {days} días"
 
-def build_search_embed(lane_name, solo_name, flex_name):
-    embed = discord.Embed(title="🟢 Grupo Abierto", color=0x2ECC71)
-    embed.add_field(name="Rol principal", value=lane_name, inline=True)
-    embed.add_field(name="Elo SoloQ", value=solo_name, inline=True)
-    embed.add_field(name="Elo FlexQ", value=flex_name, inline=True)
+def build_search_embed(creator_name, lane_display, solo_display, flex_display, window_text):
+    embed = discord.Embed(title="🟢 Grupo Abierto", color=COLOR_GROUP_OPEN)
+    embed.description = (
+        f"👤 {creator_name}\n\n"
+        f"{lane_display}\n\n"
+        f"{solo_display} · {flex_display} Flex\n\n"
+        f"👥 Buscando jugadores de {window_text}"
+    )
     return embed
 
 async def update_group_embed(thread: discord.Thread):
     """Reconstruye el embed del grupo a partir del propio hilo (fuente de
     verdad): quién está dentro (thread.fetch_members()) y si está cerrado
     (thread.locked). No guardamos la lista de miembros en ningún sitio
-    aparte — siempre se lee de Discord."""
+    aparte — siempre se lee de Discord. El tier de SoloQ de cada jugador se
+    deduce de sus roles actuales (igual que en get_effective_primary), así
+    que funciona también con gente vinculada por Orianna Bot."""
     group = get_group(thread.id)
     if not group:
         return
@@ -272,6 +285,7 @@ async def update_group_embed(thread: discord.Thread):
         thread_members = []
 
     guild = thread.guild
+    creator_id = int(group["creator_id"])
     lines = []
     for tm in thread_members:
         member = guild.get_member(tm.id)
@@ -279,20 +293,24 @@ async def update_group_embed(thread: discord.Thread):
             continue
         lane_role = get_member_lane_role(member)
         lane_display = get_lane_display(lane_role) if lane_role else "—"
-        lines.append(f"{member.display_name} · {lane_display}")
+        solo_tier = get_member_tier_from_roles(member, SOLO_ROLES) or "UNRANKED"
+        solo_display = format_tier_display(solo_tier)
+        marker = "🔸" if member.id == creator_id else "🔹"
+        lines.append(f"{marker} {member.display_name} · {lane_display} · SoloQ {solo_display}")
 
     embed = discord.Embed.from_dict(message.embeds[0].to_dict()) if message.embeds else discord.Embed()
     embed.title = "🔴 Grupo Cerrado" if thread.locked else "🟢 Grupo Abierto"
-    embed.color = 0xE74C3C if thread.locked else 0x2ECC71
+    embed.color = COLOR_GROUP_CLOSED if thread.locked else COLOR_GROUP_OPEN
 
-    # Quitamos cualquier campo "Miembros" de una actualización anterior para
-    # no duplicarlo, conservando el resto de campos (Rol principal, Elos).
-    kept_fields = [f for f in embed.fields if f.name != "👥 Miembros"]
+    # Quitamos cualquier campo "JUGADORES" de una actualización anterior
+    # para no duplicarlo (el resto del embed vive en la descripción, no en
+    # campos, así que no hay nada más que conservar aparte de este campo).
+    kept_fields = [f for f in embed.fields if f.name != "👥 JUGADORES"]
     embed.clear_fields()
     for f in kept_fields:
         embed.add_field(name=f.name, value=f.value, inline=f.inline)
     if lines:
-        embed.add_field(name="👥 Miembros", value="\n".join(lines), inline=False)
+        embed.add_field(name="👥 JUGADORES", value="\n".join(lines), inline=False)
 
     try:
         await message.edit(embed=embed)
@@ -397,10 +415,7 @@ class GroupView(View):
                 )
         except Exception as e:
             print(f"[GRUPO] Error en 'Unirse': {type(e).__name__}: {e}")
-            await interaction.followup.send(
-                f"❌ Ha ocurrido un error inesperado ({type(e).__name__}). Avisa a un administrador.",
-                ephemeral=True
-            )
+            await send_error(interaction, f"Ha ocurrido un error inesperado ({type(e).__name__}).")
 
     async def leave(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -427,10 +442,7 @@ class GroupView(View):
             await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
         except Exception as e:
             print(f"[GRUPO] Error en 'Salir': {type(e).__name__}: {e}")
-            await interaction.followup.send(
-                f"❌ Ha ocurrido un error inesperado ({type(e).__name__}). Avisa a un administrador.",
-                ephemeral=True
-            )
+            await send_error(interaction, f"Ha ocurrido un error inesperado ({type(e).__name__}).")
 
     async def _lock_group(self, thread: discord.Thread, interaction: discord.Interaction) -> bool:
         """Bloquea el hilo, refresca el embed y QUITA los botones del
@@ -443,16 +455,10 @@ class GroupView(View):
         try:
             thread = await thread.edit(locked=True)  # capturamos el objeto actualizado, no el viejo
         except discord.Forbidden:
-            await interaction.followup.send(
-                "❌ No tengo permiso de **Gestionar hilos** en este canal, así que no puedo "
-                "cerrar el grupo. Avisa a un administrador para que me lo dé.",
-                ephemeral=True
-            )
+            await send_error(interaction, "No tengo permiso de **Gestionar hilos** en este canal, así que no puedo cerrar el grupo.")
             return False
         except discord.HTTPException as e:
-            await interaction.followup.send(
-                f"❌ No se pudo cerrar el grupo (error de Discord: {e.status}).", ephemeral=True
-            )
+            await send_error(interaction, f"No se pudo cerrar el grupo (error de Discord: {e.status}).")
             return False
 
         await update_group_embed(thread)
@@ -480,10 +486,21 @@ class GroupView(View):
             await interaction.followup.send("🔒 Grupo cerrado. Ya no se admite gente nueva.", ephemeral=True)
         except Exception as e:
             print(f"[GRUPO] Error en 'Cerrar grupo': {type(e).__name__}: {e}")
-            await interaction.followup.send(
-                f"❌ Ha ocurrido un error inesperado ({type(e).__name__}). Avisa a un administrador.",
-                ephemeral=True
-            )
+            await send_error(interaction, f"Ha ocurrido un error inesperado ({type(e).__name__}).")
+
+async def send_error(interaction: discord.Interaction, detail: str):
+    """Mensaje de error estandarizado para fallos de INFRAESTRUCTURA (algo
+    está mal configurado o roto — un canal que falta, permisos, una
+    excepción inesperada). NO se usa para mensajes de validación normales
+    (cooldown, formato, 'ya estás en el grupo'...), que se quedan con su
+    propio texto específico porque ahí el usuario puede actuar por su
+    cuenta sin necesitar a un administrador."""
+    embed = discord.Embed(
+        title="❌ No se ha podido completar la acción",
+        description=f"{detail}\n\nContacta con un administrador a través de <#{ADMIN_CONTACT_CHANNEL_ID}>.",
+        color=COLOR_GROUP_CLOSED
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 async def perform_search_game(interaction: discord.Interaction, primary: dict):
     """Lógica de 'Buscar partida': cooldown, detección de lane y publicación
@@ -522,10 +539,7 @@ async def perform_search_game(interaction: discord.Interaction, primary: dict):
     channel_id = TIER_CHANNELS.get(solo_tier)
     channel = interaction.guild.get_channel(channel_id) if channel_id else None
     if not channel:
-        return await interaction.followup.send(
-            "❌ No se encontró el canal de tu rango. Avisa a un administrador.",
-            ephemeral=True
-        )
+        return await send_error(interaction, "No se ha encontrado tu canal de rango.")
 
     # Mencionamos a los roles de toda la ventana (propio + vecinos), no solo
     # al del canal, para que también se enteren los de tiers cercanos.
@@ -536,7 +550,13 @@ async def perform_search_game(interaction: discord.Interaction, primary: dict):
         if tier_role:
             role_mentions.append(tier_role.mention)
 
-    embed = build_search_embed(get_lane_display(lane_role), solo_display, flex_display)
+    # Texto "Platino / Oro": el propio tier primero, luego el/los vecinos
+    # más bajos (window_tiers está guardado de menor a mayor en config.py).
+    window_text = " / ".join(TIER_DISPLAY_ES.get(t, t) for t in reversed(window_tiers))
+
+    embed = build_search_embed(
+        interaction.user.display_name, get_lane_display(lane_role), solo_display, flex_display, window_text
+    )
 
     try:
         sent_message = await channel.send(
@@ -545,10 +565,7 @@ async def perform_search_game(interaction: discord.Interaction, primary: dict):
             allowed_mentions=discord.AllowedMentions(roles=True, users=True)
         )
     except discord.Forbidden:
-        return await interaction.followup.send(
-            f"❌ No tengo permisos para escribir en {channel.mention}. Avisa a un administrador.",
-            ephemeral=True
-        )
+        return await send_error(interaction, f"No tengo permisos para escribir en {channel.mention}.")
 
     SEARCH_COOLDOWNS[uid] = now
 
@@ -828,7 +845,10 @@ class Panel(View):
             save_data(data)
             await apply_roles(interaction.user, primary["region"], solo, flex)
 
-        await interaction.followup.send("🔄 Datos actualizados correctamente.", ephemeral=True)
+        await interaction.followup.send(
+            "🔄 **Datos actualizados**\n\nTu rango y tus roles han sido comprobados correctamente.",
+            ephemeral=True
+        )
 
 # ------------------ PANEL DE BUSCAR PARTIDA (independiente) ------------------
 
@@ -896,15 +916,18 @@ async def deploy_panel():
         return
     await channel.purge(limit=5)
     embed = discord.Embed(
-        title="🎮 Vincula tu cuenta y encuentra gente",
+        title="🎮 Tu cuenta de League of Legends, conectada con la comunidad.",
         description=(
-            "Gestiona tus cuentas de **League of Legends** y encuentra gente con la que jugar.\n\n"
-            "🔹 **Vincular cuenta:** Añade tu cuenta de League of Legends\n"
-            "🔹 **Ver cuentas:** Consulta tus cuentas vinculadas\n"
-            "🔹 **Actualizar datos:** Refresca tu rango automáticamente\n\n"
-            f"🔎 Para buscar partida, usa <#{SEARCH_PANEL_CHANNEL_ID}>"
+            "Vincula tu cuenta para obtener automáticamente tus rangos de SoloQ y FlexQ.\n\n"
+            "**¿Qué puedes hacer?**\n"
+            "🔗 Vincular tu cuenta\n"
+            "👤 Gestionar tus cuentas\n"
+            "🔄 Mantener tus rangos actualizados\n\n"
+            "───────────────\n\n"
+            "🔎 **¿Buscas gente para jugar?**\n"
+            f"Dirígete a <#{SEARCH_PANEL_CHANNEL_ID}> para publicar tu búsqueda."
         ),
-        color=0x9146FF
+        color=COLOR_PANEL
     )
     embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png")
     embed.set_footer(text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!",
@@ -918,15 +941,18 @@ async def deploy_search_panel():
         return
     await channel.purge(limit=5)
     embed = discord.Embed(
-        title="🔎 Buscar partida",
+        title="🔎 Encuentra jugadores de tu nivel",
         description=(
-            "Pulsa el botón para avisar en tu canal de rango que buscas gente con quien jugar.\n\n"
-            "Si todavía no has vinculado tu cuenta de **League of Legends**, se te pedirá "
-            "hacerlo primero — en cuanto termines, la búsqueda se publica automáticamente."
+            "Pulsa el botón y publicaremos automáticamente tu búsqueda en el canal "
+            "correspondiente a tu rango.\n\n"
+            "🏆 **Rango:** según tu SoloQ\n"
+            "🎮 **Posición:** según tu rol\n"
+            "👥 **Ventana:** rangos cercanos\n\n"
+            "Cuando encuentres grupo, tendrás un hilo privado para organizaros.\n\n"
+            "⏱️ **Cooldown:** 10 minutos"
         ),
-        color=0x2ECC71
+        color=COLOR_PANEL
     )
-    embed.set_footer(text="Cooldown: una búsqueda cada 10 minutos")
     await channel.send(embed=embed, view=SearchPanel())
 
 # ------------------ NUEVO MIEMBRO ------------------
@@ -1139,48 +1165,42 @@ async def servidor(interaction: discord.Interaction):
     # ---------- EMBED ----------
     embed = discord.Embed(
         title="📊 COMPOSICIÓN DEL SERVIDOR",
+        description=f"👥 {total_miembros} miembros",
         color=0x5865F2
-    )
-
-    # 👥 Total de miembros
-    embed.add_field(
-        name="👥 Miembros",
-        value=f"**{total_miembros} miembros**",
-        inline=False
     )
 
     # 🔗 Vinculación
     embed.add_field(
         name="🔗 Vinculación",
         value=(
-            f"🟢 **{vinculados} vinculadas** · {porcentaje_vinculados}%\n"
-            f"⚪ **{sin_vincular} pendientes** · {porcentaje_sin_vincular}%"
+            f"🟢 {vinculados} vinculados · {porcentaje_vinculados}%\n"
+            f"⚪ {sin_vincular} pendientes · {porcentaje_sin_vincular}%"
         ),
         inline=False
     )
 
-    # 🏆 SoloQ
+    # 🔸 SoloQ
     if solo_counts:
         solo_lines = "\n".join(
-            f"{format_tier_display(tier)} · **{count}**"
+            f"{format_tier_display(tier)} · {count}"
             for tier, count in solo_counts
         )
 
         embed.add_field(
-            name="🏆 SoloQ",
+            name="🔸 SoloQ",
             value=solo_lines,
             inline=False
         )
 
-    # 🎮 Rol principal
+    # 🔹 Posiciones
     if lane_counts:
         lane_lines = "\n".join(
-            f"{label} · **{count}**"
+            f"{label} · {count}"
             for label, count in lane_counts
         )
 
         embed.add_field(
-            name="🎮 Rol principal",
+            name="🔹 Posiciones",
             value=lane_lines,
             inline=False
         )
@@ -1238,16 +1258,16 @@ async def online(interaction: discord.Interaction):
         embed.description = "No hay ningún jugador con cuenta vinculada conectado ahora mismo."
         return await interaction.followup.send(embed=embed)
 
-    embed.description = f"**{total}** jugadores conectados"
+    embed.description = f"👥 {total} jugadores conectados"
 
     solo_lines = "\n".join(
-        f"{format_tier_display(tier)} · **{count}**" for tier, count in solo_counts
+        f"{format_tier_display(tier)} · {count}" for tier, count in solo_counts
     )
-    embed.add_field(name="🏆 Por rango", value=solo_lines, inline=False)
+    embed.add_field(name="🔸 SoloQ", value=solo_lines, inline=False)
 
     if lane_counts:
-        lane_lines = "\n".join(f"{label} · **{count}**" for label, count in lane_counts)
-        embed.add_field(name="🎮 Por rol", value=lane_lines, inline=False)
+        lane_lines = "\n".join(f"{label} · {count}" for label, count in lane_counts)
+        embed.add_field(name="🔹 Posiciones", value=lane_lines, inline=False)
 
     await interaction.followup.send(embed=embed)
 
