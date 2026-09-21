@@ -1,6 +1,7 @@
 import discord
 import aiohttp
 import os
+import re
 import threading
 import asyncio
 import time
@@ -34,6 +35,25 @@ COLOR_GROUP_OPEN = 0x2ECC71   # 🟢 Verde — búsqueda/grupo activo
 COLOR_GROUP_CLOSED = 0xE74C3C # 🔴 Rojo — cerrado/error
 COLOR_VERIFICATION = 0xF1C40F # 🟡 Dorado — verificación
 COLOR_ACCOUNT_INFO = 0x2C2F33 # ⚫ Oscuro — información de cuenta
+
+def apply_footer(embed: discord.Embed, guild: discord.Guild) -> discord.Embed:
+    """Firma de marca consistente en todos los embeds del bot: icono del
+    servidor + nombre + lema. Se usa el nombre/icono reales del servidor
+    (no un texto fijo), así funciona igual si cambian en el futuro."""
+    icon = guild.icon.url if guild and guild.icon else None
+    embed.set_footer(text=f"{guild.name} · Encuentra gente. Juega. Repite." if guild else "Encuentra gente. Juega. Repite.",
+                     icon_url=icon)
+    return embed
+
+def tier_thumbnail_url(tier_code: str):
+    """URL de la imagen del emoji personalizado de un tier (para usarla
+    como thumbnail), extrayendo el ID de <:nombre:ID> tal como está
+    guardado en TIER_EMOJIS. None si ese tier no tiene emoji (Sin rango)."""
+    raw = TIER_EMOJIS.get(tier_code, "")
+    match = re.search(r":(\d+)>$", raw)
+    if not match:
+        return None
+    return f"https://cdn.discordapp.com/emojis/{match.group(1)}.png"
 
 # ------------------ VERIFICACIÓN ------------------
 
@@ -168,11 +188,11 @@ def build_account_embed(acc, summoner):
     title = f"{'⭐ ' if acc['primary'] else ''}{acc['riot_id']} ({acc['region']})"
     embed = discord.Embed(title=title, color=COLOR_ACCOUNT_INFO)
     embed.set_thumbnail(url=icon_url)
-    embed.add_field(name="", value=f"**Lvl {summoner['summonerLevel']}**", inline=False)
     solo_display = format_tier_display(acc["solo"])
     flex_display = format_tier_display(acc["flex"])
-    embed.add_field(name="", value=f"SoloQ: **{solo_display}**    FlexQ: **{flex_display}**", inline=False)
-    embed.set_footer(text="Solo tú puedes verlo • Eliminar este mensaje")
+    embed.add_field(name="Nivel", value=str(summoner["summonerLevel"]), inline=True)
+    embed.add_field(name="SoloQ", value=solo_display, inline=True)
+    embed.add_field(name="FlexQ", value=flex_display, inline=True)
     return embed
 
 def get_member_lane_role(member):
@@ -246,14 +266,18 @@ def humanize_delta(delta):
         return "ayer"
     return f"hace {days} días"
 
-def build_search_embed(creator_name, lane_display, solo_display, flex_display, window_text):
+def build_search_embed(creator: discord.abc.User, lane_display, solo_tier, solo_display, flex_display, window_text):
     embed = discord.Embed(title="🟢 Grupo Abierto", color=COLOR_GROUP_OPEN)
+    embed.set_author(name=creator.display_name, icon_url=creator.display_avatar.url)
     embed.description = (
-        f"👤 {creator_name}\n\n"
         f"{lane_display}\n\n"
         f"{solo_display} · {flex_display} Flex\n\n"
         f"👥 Buscando jugadores de {window_text}"
     )
+    thumb = tier_thumbnail_url(solo_tier)
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+    embed.timestamp = discord.utils.utcnow()  # Discord lo traduce solo a "hace X min" y se conserva al clonar
     return embed
 
 async def update_group_embed(thread: discord.Thread):
@@ -397,11 +421,13 @@ class GroupView(View):
                 # Equipo completo: se cierra solo, misma lógica que "Cerrar grupo".
                 if await self._lock_group(thread, interaction):
                     try:
-                        await thread.send(
-                            "👥 El grupo ha llegado a su tamaño completo y se ha cerrado "
-                            "automáticamente. Ya no se admite gente nueva.",
-                            allowed_mentions=discord.AllowedMentions.none()
-                        )
+                        full_embed = apply_footer(discord.Embed(
+                            title="🔒 Grupo cerrado",
+                            description="Este grupo ha llegado a su tamaño completo y se ha cerrado "
+                                        "automáticamente. Ya no se admiten nuevos jugadores.",
+                            color=COLOR_GROUP_CLOSED
+                        ), thread.guild)
+                        await thread.send(embed=full_embed, allowed_mentions=discord.AllowedMentions.none())
                     except discord.HTTPException:
                         pass
                 await interaction.followup.send(
@@ -500,6 +526,7 @@ async def send_error(interaction: discord.Interaction, detail: str):
         description=f"{detail}\n\nContacta con un administrador a través de <#{ADMIN_CONTACT_CHANNEL_ID}>.",
         color=COLOR_GROUP_CLOSED
     )
+    apply_footer(embed, interaction.guild)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 async def perform_search_game(interaction: discord.Interaction, primary: dict):
@@ -555,8 +582,9 @@ async def perform_search_game(interaction: discord.Interaction, primary: dict):
     window_text = " / ".join(TIER_DISPLAY_ES.get(t, t) for t in reversed(window_tiers))
 
     embed = build_search_embed(
-        interaction.user.display_name, get_lane_display(lane_role), solo_display, flex_display, window_text
+        interaction.user, get_lane_display(lane_role), solo_tier, solo_display, flex_display, window_text
     )
+    apply_footer(embed, interaction.guild)
 
     try:
         sent_message = await channel.send(
@@ -655,6 +683,50 @@ class VerifyIconView(View):
             SEARCH_INTENT.discard(self.user_id)
             await perform_search_game(interaction, acc)
 
+class AccountSelect(discord.ui.Select):
+    """Desplegable para elegir sobre qué cuenta actuar, cuando 'Ver cuentas'
+    muestra todas combinadas en un solo embed."""
+    def __init__(self, owner_id: str, accounts: list):
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(
+                label=acc["riot_id"],
+                value=acc["puuid"],
+                description=f"{TIER_DISPLAY_ES.get(acc['solo'], acc['solo'])} SoloQ" + (" · Principal" if acc["primary"] else ""),
+                emoji="⭐" if acc["primary"] else None
+            )
+            for acc in accounts
+        ]
+        super().__init__(placeholder="Elige una cuenta para gestionar…", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != self.owner_id:
+            return await interaction.response.send_message("❌ No puedes usar esto.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+
+        puuid = self.values[0]
+        data = load_data()
+        accs = data.get(self.owner_id, [])
+        acc = next((a for a in accs if a["puuid"] == puuid), None)
+        if not acc:
+            return await interaction.followup.send("❌ Esta cuenta ya no existe.", ephemeral=True)
+
+        summoner = await get_summoner_by_puuid(acc["puuid"], acc["region"])
+        if not summoner:
+            return await interaction.followup.send(
+                "⚠️ No se pudieron obtener los datos de esa cuenta ahora mismo. Inténtalo en unos minutos.",
+                ephemeral=True
+            )
+
+        embed = apply_footer(build_account_embed(acc, summoner), interaction.guild)
+        view = AccountActionsView(owner_id=self.owner_id, puuid=acc["puuid"], is_primary=acc["primary"])
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+class AccountSelectView(View):
+    def __init__(self, owner_id: str, accounts: list):
+        super().__init__(timeout=300)
+        self.add_item(AccountSelect(owner_id, accounts))
+
 class AccountActionsView(View):
     def __init__(self, owner_id, puuid, is_primary: bool):
         # timeout finito: esta vista es efímera (nace y muere con el mensaje
@@ -705,7 +777,7 @@ class AccountActionsView(View):
                 "obtener sus datos actuales de Riot (inténtalo de nuevo más tarde).",
                 ephemeral=True
             )
-        embed = build_account_embed(acc, summoner)
+        embed = apply_footer(build_account_embed(acc, summoner), interaction.guild)
         await interaction.followup.send(f"✅ Has marcado **{acc['riot_id']}** como tu cuenta principal",
                                         embed=embed, ephemeral=True)
 
@@ -730,6 +802,16 @@ class AccountActionsView(View):
         save_data(data)
         await interaction.followup.send(f"🗑️ Cuenta **{removed['riot_id']}** eliminada.", ephemeral=True)
 
+    @discord.ui.button(emoji="🗑️", style=discord.ButtonStyle.secondary, custom_id="account_close_msg")
+    async def close_message(self, interaction, _):
+        """Cierra este mensaje — el footer ya no promete un botón que no
+        existe, ahora sí que hay uno de verdad."""
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            pass
+
 # ------------------ LINK FLOW ------------------
 
 class RegionDropdown(Select):
@@ -747,7 +829,8 @@ class RegionDropdown(Select):
             return await interaction.followup.send("❌ Riot ID no válido.", ephemeral=True)
 
         PENDING_VERIFICATIONS[str(interaction.user.id)] = {"riot_id": f"{self.name}#{self.tag}", "puuid": acc["puuid"], "region": region}
-        await interaction.followup.send(embed=verification_embed(self.name, self.tag),
+        v_embed = apply_footer(verification_embed(self.name, self.tag), interaction.guild)
+        await interaction.followup.send(embed=v_embed,
                                         view=VerifyIconView(str(interaction.user.id)), ephemeral=True)
 
 class RegionView(View):
@@ -799,6 +882,27 @@ class LinkModal(Modal):
             ephemeral=True
         )
 
+def unlinked_account_embed(guild: discord.Guild) -> discord.Embed:
+    """Embed estándar de 'cuenta no vinculada', con botón para arreglarlo
+    en el sitio. Reutilizado en todos los sitios donde una acción requiere
+    cuenta y el usuario no tiene ninguna."""
+    embed = discord.Embed(
+        title="🔒 Cuenta no vinculada",
+        description="Necesitas vincular una cuenta de League of Legends antes de utilizar esta función.",
+        color=COLOR_GROUP_CLOSED
+    )
+    return apply_footer(embed, guild)
+
+class VincularPromptView(View):
+    """Botón que abre el modal de vinculación directamente, para acompañar
+    a unlinked_account_embed()."""
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Vincular cuenta", emoji="🔗", style=discord.ButtonStyle.primary)
+    async def link(self, interaction: discord.Interaction, _):
+        await interaction.response.send_modal(LinkModal())
+
 # ------------------ PANEL ------------------
 
 class Panel(View):
@@ -812,21 +916,31 @@ class Panel(View):
     @discord.ui.button(label="Ver cuentas", style=discord.ButtonStyle.secondary, custom_id="panel_view_accounts")
     async def view_accounts(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
-        data = load_data().get(str(interaction.user.id), [])
-        if not data:
-            return await interaction.followup.send("No tienes cuentas vinculadas.", ephemeral=True)
-        for acc in data:
-            summoner = await get_summoner_by_puuid(acc["puuid"], acc["region"])
-            if not summoner:
-                await interaction.followup.send(
-                    f"⚠️ No se pudieron obtener los datos de **{acc['riot_id']}** ahora mismo "
-                    "(Riot API no respondió). Inténtalo de nuevo en unos minutos.",
-                    ephemeral=True
-                )
-                continue
-            embed = build_account_embed(acc, summoner)
-            view = AccountActionsView(owner_id=str(interaction.user.id), puuid=acc["puuid"], is_primary=acc["primary"])
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        accounts = load_data().get(str(interaction.user.id), [])
+        if not accounts:
+            return await interaction.followup.send(
+                embed=unlinked_account_embed(interaction.guild), view=VincularPromptView(), ephemeral=True
+            )
+
+        embed = discord.Embed(title="🎮 Mis cuentas", color=COLOR_ACCOUNT_INFO)
+        for acc in accounts:
+            marker = "⭐ Principal" if acc["primary"] else "Secundaria"
+            embed.add_field(
+                name=f"{acc['riot_id']} · {marker}",
+                value=(
+                    f"SoloQ {format_tier_display(acc['solo'])}\n"
+                    f"FlexQ {format_tier_display(acc['flex'])}\n"
+                    f"Región {acc['region']}"
+                ),
+                inline=True
+            )
+        apply_footer(embed, interaction.guild)
+
+        view = AccountSelectView(str(interaction.user.id), accounts)
+        await interaction.followup.send(
+            "Elige una cuenta en el desplegable para marcarla como principal o eliminarla:",
+            embed=embed, view=view, ephemeral=True
+        )
 
     @discord.ui.button(label="Actualizar datos", style=discord.ButtonStyle.success, custom_id="panel_refresh")
     async def refresh(self, interaction, _):
@@ -834,7 +948,9 @@ class Panel(View):
         data = load_data()
         uid = str(interaction.user.id)
         if uid not in data:
-            return await interaction.followup.send("No tienes cuenta principal.", ephemeral=True)
+            return await interaction.followup.send(
+                embed=unlinked_account_embed(interaction.guild), view=VincularPromptView(), ephemeral=True
+            )
 
         primary = next(a for a in data[uid] if a["primary"])
         solo, flex = await get_ranks(primary["puuid"], primary["region"])
@@ -845,10 +961,16 @@ class Panel(View):
             save_data(data)
             await apply_roles(interaction.user, primary["region"], solo, flex)
 
-        await interaction.followup.send(
-            "🔄 **Datos actualizados**\n\nTu rango y tus roles han sido comprobados correctamente.",
-            ephemeral=True
+        embed = discord.Embed(
+            title="✅ Datos actualizados",
+            description="Tu cuenta ha sido actualizada correctamente.\nTus roles del servidor están sincronizados.",
+            color=COLOR_GROUP_OPEN
         )
+        embed.add_field(name="SoloQ", value=format_tier_display(solo), inline=True)
+        embed.add_field(name="FlexQ", value=format_tier_display(flex), inline=True)
+        embed.add_field(name="Región", value=primary["region"], inline=True)
+        apply_footer(embed, interaction.guild)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ------------------ PANEL DE BUSCAR PARTIDA (independiente) ------------------
 
@@ -930,8 +1052,7 @@ async def deploy_panel():
         color=COLOR_PANEL
     )
     embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png")
-    embed.set_footer(text="Panel oficial de vinculación | ¡Mantén tus roles actualizados!",
-                     icon_url=bot.user.display_avatar.url)
+    apply_footer(embed, channel.guild)
     await channel.send(embed=embed, view=Panel())
 
 async def deploy_search_panel():
@@ -953,6 +1074,7 @@ async def deploy_search_panel():
         ),
         color=COLOR_PANEL
     )
+    apply_footer(embed, channel.guild)
     await channel.send(embed=embed, view=SearchPanel())
 
 # ------------------ NUEVO MIEMBRO ------------------
@@ -1205,6 +1327,7 @@ async def servidor(interaction: discord.Interaction):
             inline=False
         )
 
+    apply_footer(embed, guild)
     await interaction.followup.send(
     embed=embed
 )
@@ -1253,6 +1376,7 @@ async def online(interaction: discord.Interaction):
 
     total = len(online_ids)
     embed = discord.Embed(title="🟢 JUGADORES ONLINE", color=0x57F287)
+    apply_footer(embed, guild)
 
     if total == 0:
         embed.description = "No hay ningún jugador con cuenta vinculada conectado ahora mismo."
@@ -1371,11 +1495,16 @@ async def cleanup_groups_loop():
                         thread = None
                 if thread:
                     try:
-                        await thread.send(
-                            f"⏳ Este grupo se eliminará automáticamente en unos {GROUP_WARNING_MINUTES} "
-                            "minutos para evitar saturar el servidor.",
-                            allowed_mentions=discord.AllowedMentions.none()
-                        )
+                        warn_embed = apply_footer(discord.Embed(
+                            title="⏳ El grupo está a punto de cerrarse",
+                            description=(
+                                f"Este hilo se eliminará automáticamente en aproximadamente "
+                                f"{GROUP_WARNING_MINUTES} minutos para evitar saturar el servidor.\n\n"
+                                "Si vais a jugar, ¡es un buen momento para organizaros!"
+                            ),
+                            color=COLOR_GROUP_CLOSED
+                        ), thread.guild)
+                        await thread.send(embed=warn_embed, allowed_mentions=discord.AllowedMentions.none())
                     except discord.HTTPException:
                         pass
                 mark_group_warned(group["thread_id"])
@@ -1424,10 +1553,10 @@ async def ultimos(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="🕐 ÚLTIMOS EN LLEGAR",
-        description="\n".join(lines),
+        description=f"Últimos {len(ultimos_miembros)} miembros\n\n" + "\n".join(lines),
         color=0x5865F2
     )
-    embed.set_footer(text=f"Últimos {len(ultimos_miembros)} miembros")
+    apply_footer(embed, guild)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -1464,11 +1593,11 @@ async def send_unlinked_reminder(member: discord.Member, guild: discord.Guild, s
                 "Hemos visto que todavía no has vinculado tu cuenta de League of Legends.\n\n"
                 "Vincularla te da tus roles de rango y te permite usar **Buscar partida** "
                 "para encontrar gente con la que jugar ahora mismo.\n\n"
-                "📍 Puedes hacerlo en cualquier momento desde el canal de vinculación del servidor."
+                "📍 Puedes hacerlo en cualquier momento desde el canal de vinculación del servidor.\n\n"
+                "*Mensaje automático · se envía una sola vez*"
             ),
             color=0xF1C40F
         )
-        embed.set_footer(text="Mensaje automático · se envía una sola vez")
     else:
         embed = discord.Embed(
             title="🔗 ¿Sigues buscando gente con la que jugar?",
@@ -1476,11 +1605,12 @@ async def send_unlinked_reminder(member: discord.Member, guild: discord.Guild, s
                 f"Todavía tienes pendiente vincular tu cuenta en **{guild.name}**.\n\n"
                 "En cuanto la vincules, desbloqueas tus canales de rango y **Buscar partida** "
                 "para encontrar grupo al instante.\n\n"
-                "📍 Te esperamos en el canal de vinculación."
+                "📍 Te esperamos en el canal de vinculación.\n\n"
+                "*Último recordatorio automático · no recibirás más MD sobre esto*"
             ),
             color=0xE74C3C
         )
-        embed.set_footer(text="Último recordatorio automático · no recibirás más MD sobre esto")
+    apply_footer(embed, guild)
 
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
@@ -1515,6 +1645,7 @@ async def send_unlinked_reminder(member: discord.Member, guild: discord.Guild, s
         ),
         color=color_log
     )
+    apply_footer(log_embed, guild)
     try:
         await log_channel.send(embed=log_embed)
     except discord.Forbidden:
