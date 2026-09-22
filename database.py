@@ -30,16 +30,20 @@ def init_db():
             channel_id TEXT NOT NULL,
             creator_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            warned INTEGER NOT NULL DEFAULT 0
+            warned INTEGER NOT NULL DEFAULT 0,
+            mode TEXT NOT NULL DEFAULT 'DUOQ'
         )
         """)
 
-        # Migración: si active_groups ya existía de un despliegue anterior a
-        # que añadiéramos 'warned', CREATE TABLE IF NOT EXISTS no la habría
-        # creado (la tabla ya existía). Lo comprobamos y la añadimos a mano.
+        # Migración: si active_groups ya existía de despliegues anteriores a
+        # que añadiéramos alguna columna, CREATE TABLE IF NOT EXISTS no la
+        # habría creado (la tabla ya existía). Lo comprobamos y las añadimos
+        # a mano, una por una.
         cols = [row[1] for row in conn.execute("PRAGMA table_info(active_groups)").fetchall()]
         if "warned" not in cols:
             conn.execute("ALTER TABLE active_groups ADD COLUMN warned INTEGER NOT NULL DEFAULT 0")
+        if "mode" not in cols:
+            conn.execute("ALTER TABLE active_groups ADD COLUMN mode TEXT NOT NULL DEFAULT 'DUOQ'")
 
 def load_data():
     with get_conn() as conn:
@@ -121,40 +125,40 @@ def mark_reminder_sent(user_id, which):
     with get_conn() as conn:
         conn.execute(f"UPDATE unlinked_tracking SET {column}=1 WHERE user_id=?", (user_id,))
 
-def create_group(thread_id, message_id, channel_id, creator_id, created_at_iso):
+def create_group(thread_id, message_id, channel_id, creator_id, created_at_iso, mode="DUOQ"):
     """Registra un grupo de 'Buscar partida' recién creado, para poder
     reconstruir sus botones tras un reinicio y para el borrado automático."""
     with get_conn() as conn:
         conn.execute("""
-        INSERT INTO active_groups (thread_id, message_id, channel_id, creator_id, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO active_groups (thread_id, message_id, channel_id, creator_id, created_at, mode)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
             message_id=excluded.message_id, channel_id=excluded.channel_id,
-            creator_id=excluded.creator_id, created_at=excluded.created_at
-        """, (str(thread_id), str(message_id), str(channel_id), str(creator_id), created_at_iso))
+            creator_id=excluded.creator_id, created_at=excluded.created_at, mode=excluded.mode
+        """, (str(thread_id), str(message_id), str(channel_id), str(creator_id), created_at_iso, mode))
 
 def get_group(thread_id):
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT thread_id, message_id, channel_id, creator_id, created_at, warned "
+            "SELECT thread_id, message_id, channel_id, creator_id, created_at, warned, mode "
             "FROM active_groups WHERE thread_id=?", (str(thread_id),)
         )
         row = cur.fetchone()
     if not row:
         return None
     return {"thread_id": row[0], "message_id": row[1], "channel_id": row[2],
-            "creator_id": row[3], "created_at": row[4], "warned": bool(row[5])}
+            "creator_id": row[3], "created_at": row[4], "warned": bool(row[5]), "mode": row[6]}
 
 def get_all_groups():
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT thread_id, message_id, channel_id, creator_id, created_at, warned FROM active_groups")
+        cur.execute("SELECT thread_id, message_id, channel_id, creator_id, created_at, warned, mode FROM active_groups")
         rows = cur.fetchall()
     return [
         {"thread_id": tid, "message_id": mid, "channel_id": cid, "creator_id": crid,
-         "created_at": ca, "warned": bool(w)}
-        for tid, mid, cid, crid, ca, w in rows
+         "created_at": ca, "warned": bool(w), "mode": mode}
+        for tid, mid, cid, crid, ca, w, mode in rows
     ]
 
 def delete_group(thread_id):
