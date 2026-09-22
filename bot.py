@@ -68,8 +68,12 @@ SEARCH_COOLDOWNS = {}
 
 # Usuarios que pulsaron "Buscar partida" sin tener cuenta vinculada: al
 # terminar de vincularla, se les lanza la búsqueda automáticamente para
-# ahorrarles el segundo clic.
-SEARCH_INTENT = set()
+# ahorrarles el segundo clic. user_id -> mode_key (qué modalidad querían).
+SEARCH_INTENT = {}
+
+# Modalidad que cada usuario eligió en el desplegable del panel de Buscar
+# partida, hasta que pulse el botón (o cambie de opinión). user_id -> mode_key.
+PENDING_MODE_SELECTION = {}
 
 # ------------------ RIOT API ------------------
 
@@ -266,17 +270,22 @@ def humanize_delta(delta):
         return "ayer"
     return f"hace {days} días"
 
-def build_search_embed(creator: discord.abc.User, lane_display, solo_tier, solo_display, flex_display, window_text):
+def build_search_embed(creator: discord.abc.User, lane_display, rank_line, bottom_line, thumbnail_tier=None):
     embed = discord.Embed(title="🟢 Grupo Abierto", color=COLOR_GROUP_OPEN)
     embed.set_author(name=creator.display_name, icon_url=creator.display_avatar.url)
-    embed.description = (
-        f"{lane_display}\n\n"
-        f"{solo_display} · {flex_display} Flex\n\n"
-        f"👥 Buscando jugadores de {window_text}"
-    )
-    thumb = tier_thumbnail_url(solo_tier)
-    if thumb:
-        embed.set_thumbnail(url=thumb)
+
+    parts = []
+    if lane_display:
+        parts.append(lane_display)
+    if rank_line:
+        parts.append(rank_line)
+    parts.append(bottom_line)
+    embed.description = "\n\n".join(parts)
+
+    if thumbnail_tier:
+        thumb = tier_thumbnail_url(thumbnail_tier)
+        if thumb:
+            embed.set_thumbnail(url=thumb)
     embed.timestamp = discord.utils.utcnow()  # Discord lo traduce solo a "hace X min" y se conserva al clonar
     return embed
 
@@ -310,17 +319,21 @@ async def update_group_embed(thread: discord.Thread):
 
     guild = thread.guild
     creator_id = int(group["creator_id"])
+    mode = GAME_MODES.get(group["mode"], GAME_MODES["DUOQ"])
     lines = []
     for tm in thread_members:
         member = guild.get_member(tm.id)
         if not member or member.bot:
             continue
-        lane_role = get_member_lane_role(member)
-        lane_display = get_lane_display(lane_role) if lane_role else "—"
         solo_tier = get_member_tier_from_roles(member, SOLO_ROLES) or "UNRANKED"
         solo_display = format_tier_display(solo_tier)
         marker = "🔸" if member.id == creator_id else "🔹"
-        lines.append(f"{marker} {member.display_name} · {lane_display} · SoloQ {solo_display}")
+        if mode["show_lane"]:
+            lane_role = get_member_lane_role(member)
+            lane_display = get_lane_display(lane_role) if lane_role else "—"
+            lines.append(f"{marker} {member.display_name} · {lane_display} · SoloQ {solo_display}")
+        else:
+            lines.append(f"{marker} {member.display_name} · SoloQ {solo_display}")
 
     embed = discord.Embed.from_dict(message.embeds[0].to_dict()) if message.embeds else discord.Embed()
     embed.title = "🔴 Grupo Cerrado" if thread.locked else "🟢 Grupo Abierto"
@@ -417,7 +430,10 @@ class GroupView(View):
             except discord.HTTPException:
                 members_after = []
 
-            if len(members_after) >= GROUP_MAX_MEMBERS:
+            group_record = get_group(thread.id)
+            mode = GAME_MODES.get(group_record["mode"], GAME_MODES["DUOQ"]) if group_record else GAME_MODES["DUOQ"]
+
+            if len(members_after) >= mode["max_members"]:
                 # Equipo completo: se cierra solo, misma lógica que "Cerrar grupo".
                 if await self._lock_group(thread, interaction):
                     try:
@@ -529,80 +545,108 @@ async def send_error(interaction: discord.Interaction, detail: str):
     apply_footer(embed, interaction.guild)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-async def perform_search_game(interaction: discord.Interaction, primary: dict):
-    """Lógica de 'Buscar partida': cooldown, detección de lane y publicación
-    en el canal del tier propio, mencionando a los roles de toda la ventana
-    de tier (propio + vecinos) para no triplicar el mensaje en varios
-    canales. Asume que la interacción ya se difirió (interaction.response.defer)
-    y usa followups para responder. Se reutiliza tanto desde el botón del
-    panel como desde el flujo de vinculación automática (cuando el usuario
-    no tenía cuenta y se le abrió el modal de vinculación desde
-    'Buscar partida')."""
+async def perform_search(interaction: discord.Interaction, mode_key: str, primary: dict):
+    """Lógica de 'Buscar partida' para cualquier modalidad. DUOQ usa el
+    sistema de 11 canales por tier de SoloQ (con ventana de tiers cercanos,
+    mencionando a los roles de esa ventana); el resto de modos usa un único
+    canal fijo, sin ventana ni menciones de rol. Asume que la interacción ya
+    se difirió (interaction.response.defer) y usa followups para responder.
+    Se reutiliza tanto desde el botón del panel como desde el flujo de
+    vinculación automática (cuando el usuario no tenía cuenta y se le abrió
+    el modal de vinculación desde 'Buscar partida')."""
+    mode = GAME_MODES.get(mode_key, GAME_MODES["DUOQ"])
     uid = str(interaction.user.id)
     now = time.time()
+    cooldown_key = f"{uid}:{mode_key}"
 
-    last_use = SEARCH_COOLDOWNS.get(uid)
+    last_use = SEARCH_COOLDOWNS.get(cooldown_key)
     if last_use and (now - last_use) < SEARCH_COOLDOWN_SECONDS:
         remaining = int(SEARCH_COOLDOWN_SECONDS - (now - last_use))
         minutos, segundos = divmod(remaining, 60)
         return await interaction.followup.send(
-            f"⏳ Ya has publicado una búsqueda hace poco. Espera **{minutos}m {segundos}s** para volver a usarlo.",
+            f"⏳ Ya has publicado una búsqueda de **{mode['label']}** hace poco. "
+            f"Espera **{minutos}m {segundos}s** para volver a usarlo.",
             ephemeral=True
         )
 
-    lane_role = get_member_lane_role(interaction.user)
-    if not lane_role:
-        return await interaction.followup.send(
-            "❌ No se ha detectado tu rol de posición (lane). Revisa que completaste las "
-            "preguntas de incorporación del servidor.",
-            ephemeral=True
-        )
+    lane_role = None
+    if mode["show_lane"]:
+        lane_role = get_member_lane_role(interaction.user)
+        if not lane_role:
+            return await interaction.followup.send(
+                "❌ No se ha detectado tu rol de posición (lane). Revisa que completaste las "
+                "preguntas de incorporación del servidor.",
+                ephemeral=True
+            )
 
     solo_tier = primary["solo"]
     flex_tier = primary["flex"]
-    solo_display = format_tier_display(solo_tier)
-    flex_display = format_tier_display(flex_tier)
 
-    channel_id = TIER_CHANNELS.get(solo_tier)
-    channel = interaction.guild.get_channel(channel_id) if channel_id else None
-    if not channel:
-        return await send_error(interaction, "No se ha encontrado tu canal de rango.")
-
-    # Mencionamos a los roles de toda la ventana (propio + vecinos), no solo
-    # al del canal, para que también se enteren los de tiers cercanos.
-    window_tiers = TIER_SEARCH_WINDOWS.get(solo_tier, [solo_tier])
+    # ---------- Canal, menciones, texto de rango y miniatura según el modo ----------
     role_mentions = []
-    for tier in window_tiers:
-        tier_role = interaction.guild.get_role(SOLO_ROLES.get(tier))
-        if tier_role:
-            role_mentions.append(tier_role.mention)
+    rank_line = None
+    thumbnail_tier = None
 
-    # Texto "Platino / Oro": el propio tier primero, luego el/los vecinos
-    # más bajos (window_tiers está guardado de menor a mayor en config.py).
-    window_text = " / ".join(TIER_DISPLAY_ES.get(t, t) for t in reversed(window_tiers))
+    if mode_key == "DUOQ":
+        channel_id = TIER_CHANNELS.get(solo_tier)
+        channel = interaction.guild.get_channel(channel_id) if channel_id else None
+        if not channel:
+            return await send_error(interaction, "No se ha encontrado tu canal de rango.")
 
-    embed = build_search_embed(
-        interaction.user, get_lane_display(lane_role), solo_tier, solo_display, flex_display, window_text
-    )
+        # Mencionamos a los roles de toda la ventana (propio + vecinos), no
+        # solo al del canal, para que también se enteren los de tiers cercanos.
+        window_tiers = TIER_SEARCH_WINDOWS.get(solo_tier, [solo_tier])
+        for tier in window_tiers:
+            tier_role = interaction.guild.get_role(SOLO_ROLES.get(tier))
+            if tier_role:
+                role_mentions.append(tier_role.mention)
+
+        # Texto "Platino / Oro": el propio tier primero, luego el/los vecinos
+        # más bajos (window_tiers está guardado de menor a mayor en config.py).
+        window_text = " / ".join(TIER_DISPLAY_ES.get(t, t) for t in reversed(window_tiers))
+        rank_line = f"{format_tier_display(solo_tier)} · {format_tier_display(flex_tier)} Flex"
+        bottom_line = f"👥 Buscando jugadores de {window_text}"
+        thumbnail_tier = solo_tier
+    else:
+        channel_id = mode.get("channel_id")
+        channel = interaction.guild.get_channel(channel_id) if channel_id else None
+        if not channel:
+            return await send_error(
+                interaction, f"El canal de **{mode['label']}** todavía no está configurado."
+            )
+
+        if mode["rank_source"] == "flex":
+            rank_line = f"{format_tier_display(flex_tier)} FlexQ"
+            thumbnail_tier = flex_tier
+        elif mode["rank_source"] == "solo_ref":
+            rank_line = f"{format_tier_display(solo_tier)} SoloQ (referencia)"
+            thumbnail_tier = solo_tier
+        # rank_source None: no se muestra ningún rango
+
+        bottom_line = f"👥 Buscando jugadores para {mode['label']}"
+
+    lane_display = get_lane_display(lane_role) if lane_role else None
+    embed = build_search_embed(interaction.user, lane_display, rank_line, bottom_line, thumbnail_tier)
     apply_footer(embed, interaction.guild)
 
+    mention_prefix = f"{' '.join(role_mentions)} " if role_mentions else ""
     try:
         sent_message = await channel.send(
-            content=f"{' '.join(role_mentions)} {interaction.user.mention} está buscando partida",
+            content=f"{mention_prefix}{interaction.user.mention} está buscando partida",
             embed=embed,
             allowed_mentions=discord.AllowedMentions(roles=True, users=True)
         )
     except discord.Forbidden:
         return await send_error(interaction, f"No tengo permisos para escribir en {channel.mention}.")
 
-    SEARCH_COOLDOWNS[uid] = now
+    SEARCH_COOLDOWNS[cooldown_key] = now
 
     # Hilo privado para que el grupo se comunique sin MD, con sus botones de
     # Unirse / Salir / Cerrar grupo. Si por lo que sea falla la creación
     # (permisos, etc.), seguimos adelante sin grupo — el aviso ya se mandó.
     try:
         thread = await channel.create_thread(
-            name=f"Grupo de {interaction.user.display_name}",
+            name=f"{mode['label']} de {interaction.user.display_name}",
             type=discord.ChannelType.private_thread,
             auto_archive_duration=GROUP_THREAD_ARCHIVE_MINUTES,
             invitable=False
@@ -610,7 +654,7 @@ async def perform_search_game(interaction: discord.Interaction, primary: dict):
         await thread.add_user(interaction.user)
 
         create_group(thread.id, sent_message.id, channel.id, interaction.user.id,
-                      discord.utils.utcnow().isoformat())
+                      discord.utils.utcnow().isoformat(), mode=mode_key)
 
         view = GroupView(thread.id, interaction.user.id)
         bot.add_view(view)
@@ -625,7 +669,7 @@ async def perform_search_game(interaction: discord.Interaction, primary: dict):
         print(f"[GRUPO] No se pudo crear el hilo para {interaction.user}: {e}")
 
     await interaction.followup.send(
-        f"✅ Aviso publicado en {channel.mention}. ¡Suerte encontrando partida!",
+        f"✅ Aviso de **{mode['label']}** publicado en {channel.mention}. ¡Suerte encontrando partida!",
         ephemeral=True
     )
 
@@ -674,14 +718,15 @@ class VerifyIconView(View):
         stop_unlinked_tracking(self.user_id)  # ya vinculó, para el cronómetro de recordatorios
 
         await interaction.followup.send("✅ **Cuenta vinculada correctamente**",
-                                        embed=build_account_embed(acc, summoner), ephemeral=True)
+                                        embed=apply_footer(build_account_embed(acc, summoner), interaction.guild),
+                                        ephemeral=True)
 
         # Si llegó aquí desde "Buscar partida" (no tenía cuenta y le abrimos
         # el modal de vinculación), le lanzamos la búsqueda automáticamente
         # para ahorrarle el segundo clic.
         if self.user_id in SEARCH_INTENT:
-            SEARCH_INTENT.discard(self.user_id)
-            await perform_search_game(interaction, acc)
+            mode_key = SEARCH_INTENT.pop(self.user_id)
+            await perform_search(interaction, mode_key, acc)
 
 class AccountSelect(discord.ui.Select):
     """Desplegable para elegir sobre qué cuenta actuar, cuando 'Ver cuentas'
@@ -974,26 +1019,50 @@ class Panel(View):
 
 # ------------------ PANEL DE BUSCAR PARTIDA (independiente) ------------------
 
+class ModeSelect(discord.ui.Select):
+    """Desplegable para elegir la modalidad antes de pulsar 'Buscar
+    partida'. La elección se guarda en PENDING_MODE_SELECTION hasta que se
+    pulse el botón (o se cambie de opinión eligiendo otra)."""
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=mode["label"], value=key)
+            for key, mode in GAME_MODES.items()
+        ]
+        super().__init__(placeholder="Elige una modalidad…", options=options,
+                         custom_id="panel_mode_select", min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        uid = str(interaction.user.id)
+        mode_key = self.values[0]
+        PENDING_MODE_SELECTION[uid] = mode_key
+        mode = GAME_MODES.get(mode_key, GAME_MODES["DUOQ"])
+        await interaction.response.send_message(
+            f"✅ Modalidad seleccionada: **{mode['label']}**. Pulsa **Buscar partida** para publicarla.",
+            ephemeral=True
+        )
+
 class SearchPanel(View):
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(ModeSelect())
 
     @discord.ui.button(label="Buscar partida", emoji="🔎", style=discord.ButtonStyle.primary, custom_id="panel_search_game")
     async def search_game(self, interaction, _):
         uid = str(interaction.user.id)
+        mode_key = PENDING_MODE_SELECTION.get(uid, "DUOQ")
         primary = get_effective_primary(uid, interaction.user)
 
         if not primary:
             # Ni cuenta en nuestra DB ni rol de rango puesto por nadie: le
             # abrimos el modal de "Vincular cuenta" (send_modal debe ser la
             # PRIMERA respuesta a la interacción, así que esto va antes del
-            # defer()). Marcamos la intención para que, al terminar de
-            # vincular, se le lance la búsqueda automáticamente.
-            SEARCH_INTENT.add(uid)
+            # defer()). Marcamos la intención (con la modalidad elegida) para
+            # que, al terminar de vincular, se le lance la búsqueda automática.
+            SEARCH_INTENT[uid] = mode_key
             return await interaction.response.send_modal(LinkModal())
 
         await interaction.response.defer(ephemeral=True)
-        await perform_search_game(interaction, primary)
+        await perform_search(interaction, mode_key, primary)
 
 # ------------------ REFRESCO AUTOMÁTICO DE RANGOS ------------------
 
@@ -1064,13 +1133,13 @@ async def deploy_search_panel():
     embed = discord.Embed(
         title="🔎 Encuentra jugadores de tu nivel",
         description=(
-            "Pulsa el botón y publicaremos automáticamente tu búsqueda en el canal "
-            "correspondiente a tu rango.\n\n"
-            "🏆 **Rango:** según tu SoloQ\n"
-            "🎮 **Posición:** según tu rol\n"
-            "👥 **Ventana:** rangos cercanos\n\n"
+            "Elige la modalidad en el desplegable y pulsa el botón — publicaremos "
+            "automáticamente tu búsqueda en el canal correspondiente.\n\n"
+            "🎮 **DuoQ, FlexQ, Normales, Clash, ARAM, Arena o Classic**\n"
+            "🏆 **Rango:** según corresponda a la modalidad\n"
+            "👥 **DuoQ:** también avisa a rangos cercanos\n\n"
             "Cuando encuentres grupo, tendrás un hilo privado para organizaros.\n\n"
-            "⏱️ **Cooldown:** 10 minutos"
+            "⏱️ **Cooldown:** 10 minutos, independiente por cada modalidad"
         ),
         color=COLOR_PANEL
     )
