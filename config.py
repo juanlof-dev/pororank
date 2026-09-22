@@ -30,8 +30,9 @@ ADMIN_CONTACT_CHANNEL_ID = 1547249710526373919
 # archiva el hilo (no lo borra, solo lo saca de la vista activa).
 GROUP_LIFETIME_HOURS = 3
 GROUP_THREAD_ARCHIVE_MINUTES = 60
-GROUP_MAX_MEMBERS = 5          # se cierra solo al llegar a este número
 GROUP_WARNING_MINUTES = 15     # aviso sin menciones esto antes de borrarse
+# El tamaño máximo del grupo ya no es un número fijo — cada modalidad tiene
+# el suyo dentro de GAME_MODES (más abajo).
 
 
 REGIONS = {
@@ -161,4 +162,64 @@ LANE_EMOJIS = {
     "MID": "<:midlane:1548290125488717864>",
     "ADC": "<:adc:1548290010514460763>",
     "SUPPORT": "<:support:1548290176093134990>",
+}
+
+# 📌 Modalidades de juego para "Buscar partida". DUOQ es un caso especial:
+# usa el sistema de 11 canales por tier de SoloQ que ya existe
+# (TIER_CHANNELS/TIER_SEARCH_WINDOWS), así que no lleva channel_id aquí.
+# El resto tiene un único canal fijo cada una.
+#
+# rank_source: "solo" (SoloQ real, solo DuoQ), "flex" (FlexQ real),
+#              "solo_ref" (SoloQ mostrado como referencia informal, no
+#              filtra canal), o None (no se muestra ningún rango).
+GAME_MODES = {
+    "DUOQ": {
+        "label": "DuoQ (SoloQ)",
+        "channel_id": None,  # usa TIER_CHANNELS, no un canal fijo
+        "max_members": 2,
+        "rank_source": "solo",
+        "show_lane": True,
+    },
+    "FLEXQ": {
+        "label": "FlexQ",
+        "channel_id": 1551502779296518154,
+        "max_members": 5,
+        "rank_source": "flex",
+        "show_lane": True,
+    },
+    "NORMALES": {
+        "label": "Normales",
+        "channel_id": 1547317799318331392,
+        "max_members": 5,
+        "rank_source": "solo_ref",
+        "show_lane": True,
+    },
+    "CLASH": {
+        "label": "Clash",
+        "channel_id": 1547317483390632056,
+        "max_members": 5,
+        "rank_source": "solo_ref",
+        "show_lane": True,
+    },
+    "ARAM": {
+        "label": "ARAM",
+        "channel_id": 1548320551909462037,
+        "max_members": 5,
+        "rank_source": "solo_ref",
+        "show_lane": False,
+    },
+    "ARENA": {
+        "label": "Arena",
+        "channel_id": 1548320630271774760,
+        "max_members": 5,
+        "rank_source": "solo_ref",
+        "show_lane": False,
+    },
+    "CLASSIC": {
+        "label": "Classic",
+        "channel_id": 1549117100227035186,
+        "max_members": 5,
+        "rank_source": "solo_ref",
+        "show_lane": True,
+    },
 }
