@@ -336,7 +336,8 @@ async def update_group_embed(thread: discord.Thread):
             lines.append(f"{marker} {member.display_name} · SoloQ {solo_display}")
 
     embed = discord.Embed.from_dict(message.embeds[0].to_dict()) if message.embeds else discord.Embed()
-    embed.title = "🔴 Grupo Cerrado" if thread.locked else "🟢 Grupo Abierto"
+    contador = f"({len(lines)}/{mode['max_members']})"
+    embed.title = f"🔴 Grupo Cerrado {contador}" if thread.locked else f"🟢 Grupo Abierto {contador}"
     embed.color = COLOR_GROUP_CLOSED if thread.locked else COLOR_GROUP_OPEN
 
     # Quitamos cualquier campo "JUGADORES" de una actualización anterior
@@ -386,6 +387,13 @@ class GroupView(View):
         )
         close_btn.callback = self.close_group
         self.add_item(close_btn)
+
+        cancel_btn = discord.ui.Button(
+            label="Cancelar búsqueda", emoji="🗑️", style=discord.ButtonStyle.secondary,
+            custom_id=f"group_cancel:{thread_id}:{creator_id}"
+        )
+        cancel_btn.callback = self.cancel_search
+        self.add_item(cancel_btn)
 
     async def _get_thread(self, interaction: discord.Interaction):
         thread = interaction.guild.get_channel_or_thread(self.thread_id)
@@ -528,6 +536,39 @@ class GroupView(View):
             await interaction.followup.send("🔒 Grupo cerrado. Ya no se admite gente nueva.", ephemeral=True)
         except Exception as e:
             print(f"[GRUPO] Error en 'Cerrar grupo': {type(e).__name__}: {e}")
+            await send_error(interaction, f"Ha ocurrido un error inesperado ({type(e).__name__}).")
+
+    async def cancel_search(self, interaction: discord.Interaction):
+        """A diferencia de 'Cerrar grupo' (que bloquea pero deja el mensaje
+        como histórico), esto borra el hilo Y el mensaje al momento — para
+        cuando el creador ya no quiere ni rastro de esta búsqueda (encontró
+        gente por otro lado, se equivocó de modalidad, etc.)."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if interaction.user.id != self.creator_id:
+                return await interaction.followup.send(
+                    "Solo el creador de la búsqueda puede cancelarla.", ephemeral=True
+                )
+
+            thread = await self._get_thread(interaction)
+            if thread:
+                try:
+                    await thread.delete()
+                except discord.HTTPException:
+                    pass
+
+            if interaction.message:
+                try:
+                    await interaction.message.delete()
+                except discord.HTTPException:
+                    pass
+
+            delete_group(str(self.thread_id))
+            await interaction.followup.send(
+                "🗑️ Búsqueda cancelada. Se ha eliminado el hilo y el aviso del canal.", ephemeral=True
+            )
+        except Exception as e:
+            print(f"[GRUPO] Error en 'Cancelar búsqueda': {type(e).__name__}: {e}")
             await send_error(interaction, f"Ha ocurrido un error inesperado ({type(e).__name__}).")
 
 async def send_error(interaction: discord.Interaction, detail: str):
@@ -1591,6 +1632,66 @@ async def cleanup_groups_loop_error(error: BaseException):
     arriba, lo dejamos en el log en vez de dejar que discord.py pare la
     tarea para siempre en silencio."""
     print(f"[GRUPO] cleanup_groups_loop se cayó con un error no controlado: {type(error).__name__}: {error}")
+
+# ------------------ GRUPOS ABIERTOS ------------------
+
+@bot.tree.command(
+    name="grupos",
+    description="Grupos de búsqueda abiertos ahora mismo, en cualquier modalidad."
+)
+async def grupos(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    open_groups = []
+    for group in get_all_groups():
+        thread_id = int(group["thread_id"])
+        thread = bot.get_channel(thread_id)
+        if not thread:
+            try:
+                thread = await bot.fetch_channel(thread_id)
+            except discord.HTTPException:
+                continue
+        if not thread or thread.locked:
+            continue
+
+        try:
+            members = await thread.fetch_members()
+        except discord.HTTPException:
+            members = []
+        count = sum(1 for m in members if guild.get_member(m.id) and not guild.get_member(m.id).bot)
+
+        mode = GAME_MODES.get(group["mode"], GAME_MODES["DUOQ"])
+        creator = guild.get_member(int(group["creator_id"]))
+        creator_name = creator.display_name if creator else "alguien"
+        jump_url = f"https://discord.com/channels/{guild.id}/{group['channel_id']}/{group['message_id']}"
+
+        open_groups.append({
+            "mode_label": mode["label"],
+            "creator_name": creator_name,
+            "count": count,
+            "max": mode["max_members"],
+            "url": jump_url,
+            "created_at": group["created_at"],
+        })
+
+    embed = discord.Embed(title="🔎 Grupos abiertos ahora mismo", color=COLOR_GROUP_OPEN)
+    apply_footer(embed, guild)
+
+    if not open_groups:
+        embed.description = (
+            f"No hay ningún grupo abierto ahora mismo. ¡Publica el primero en "
+            f"<#{SEARCH_PANEL_CHANNEL_ID}>!"
+        )
+        return await interaction.followup.send(embed=embed, ephemeral=True)
+
+    open_groups.sort(key=lambda g: g["created_at"], reverse=True)
+    embed.description = "\n".join(
+        f"🎮 **{g['mode_label']}** · {g['creator_name']} · {g['count']}/{g['max']} · [Ver mensaje]({g['url']})"
+        for g in open_groups
+    )
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ------------------ ÚLTIMOS EN LLEGAR ------------------
 
