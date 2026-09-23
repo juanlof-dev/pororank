@@ -683,8 +683,10 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
     SEARCH_COOLDOWNS[cooldown_key] = now
 
     # Hilo privado para que el grupo se comunique sin MD, con sus botones de
-    # Unirse / Salir / Cerrar grupo. Si por lo que sea falla la creación
-    # (permisos, etc.), seguimos adelante sin grupo — el aviso ya se mandó.
+    # Unirse / Salir / Cerrar grupo. Si falla (permisos, etc.), el aviso ya
+    # se mandó pero NO decimos "todo ok" — avisamos claramente de que el
+    # grupo no quedó operativo, para que no pase desapercibido.
+    group_ready = False
     try:
         thread = await channel.create_thread(
             name=f"{mode['label']} de {interaction.user.display_name}",
@@ -706,13 +708,23 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
             f"🔒 Este es tu hilo privado, {interaction.user.mention}. Habla aquí con quien se una "
             f"al grupo. Se eliminará automáticamente pasadas {GROUP_LIFETIME_HOURS}h."
         )
+        group_ready = True
     except discord.HTTPException as e:
-        print(f"[GRUPO] No se pudo crear el hilo para {interaction.user}: {e}")
+        print(f"[GRUPO] No se pudo crear el hilo para {interaction.user} en {mode['label']}: "
+              f"{type(e).__name__}: {e}")
 
-    await interaction.followup.send(
-        f"✅ Aviso de **{mode['label']}** publicado en {channel.mention}. ¡Suerte encontrando partida!",
-        ephemeral=True
-    )
+    if group_ready:
+        await interaction.followup.send(
+            f"✅ Aviso de **{mode['label']}** publicado en {channel.mention}. ¡Suerte encontrando partida!",
+            ephemeral=True
+        )
+    else:
+        await send_error(
+            interaction,
+            f"El aviso de **{mode['label']}** se publicó en {channel.mention}, pero no se pudo crear "
+            "el hilo de grupo (probablemente falta un permiso del bot en ese canal). Ese mensaje se "
+            "quedará sin botones ni cierre automático hasta que se corrija."
+        )
 
 # ------------------ VIEWS ------------------
 
