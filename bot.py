@@ -729,6 +729,12 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
         # funcionando igual sin voz.
         voice_channel = None
         try:
+            voice_category = interaction.guild.get_channel(VOICE_CHANNEL_CATEGORY_ID)
+            if not isinstance(voice_category, discord.CategoryChannel):
+                print(f"[GRUPO] VOICE_CHANNEL_CATEGORY_ID ({VOICE_CHANNEL_CATEGORY_ID}) no es una "
+                      "categoría válida o no se encuentra; el canal de voz se creará sin categoría.")
+                voice_category = None
+
             voice_overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
                 interaction.user: discord.PermissionOverwrite(view_channel=True, connect=True),
@@ -736,7 +742,7 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
             }
             voice_channel = await interaction.guild.create_voice_channel(
                 name=random.choice(VOICE_CHANNEL_NAMES),
-                category=channel.category,
+                category=voice_category,
                 user_limit=mode["max_members"],
                 overwrites=voice_overwrites
             )
