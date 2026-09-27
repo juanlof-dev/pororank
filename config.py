@@ -164,6 +164,29 @@ LANE_EMOJIS = {
     "SUPPORT": "<:support:1548290176093134990>",
 }
 
+# 📌 Nombres aleatorios para los canales de voz temporales de los grupos
+VOICE_CHANNEL_NAMES = [
+    "Sala Aguas Estancadas",
+    "Sala Ciudad de Bandle",
+    "Sala Demacia",
+    "Sala El Vacío",
+    "Sala Freljord",
+    "Sala Islas de Sombra",
+    "Sala Ixtal",
+    "Sala Jonia",
+    "Sala Noxus",
+    "Sala Piltover",
+    "Sala Shurima",
+    "Sala Targon",
+    "Sala Zaun",
+]
+
+# 📌 Si nadie se une nunca a un canal de voz de grupo, se borra solo pasados
+# estos minutos desde que se creó el grupo (comprobado en la limpieza
+# periódica). Si se vacía porque todos se han ido, se borra aparte con un
+# margen de gracia de 60s (ver on_voice_state_update en bot.py).
+VOICE_EMPTY_TIMEOUT_MINUTES = 15
+
 # 📌 Modalidades de juego para "Buscar partida". DUOQ es un caso especial:
 # usa el sistema de 11 canales por tier de SoloQ que ya existe
 # (TIER_CHANNELS/TIER_SEARCH_WINDOWS), así que no lleva channel_id aquí.
