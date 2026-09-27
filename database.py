@@ -31,7 +31,8 @@ def init_db():
             creator_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
             warned INTEGER NOT NULL DEFAULT 0,
-            mode TEXT NOT NULL DEFAULT 'DUOQ'
+            mode TEXT NOT NULL DEFAULT 'DUOQ',
+            voice_channel_id TEXT
         )
         """)
 
@@ -44,6 +45,8 @@ def init_db():
             conn.execute("ALTER TABLE active_groups ADD COLUMN warned INTEGER NOT NULL DEFAULT 0")
         if "mode" not in cols:
             conn.execute("ALTER TABLE active_groups ADD COLUMN mode TEXT NOT NULL DEFAULT 'DUOQ'")
+        if "voice_channel_id" not in cols:
+            conn.execute("ALTER TABLE active_groups ADD COLUMN voice_channel_id TEXT")
 
 def load_data():
     with get_conn() as conn:
@@ -125,40 +128,43 @@ def mark_reminder_sent(user_id, which):
     with get_conn() as conn:
         conn.execute(f"UPDATE unlinked_tracking SET {column}=1 WHERE user_id=?", (user_id,))
 
-def create_group(thread_id, message_id, channel_id, creator_id, created_at_iso, mode="DUOQ"):
+def create_group(thread_id, message_id, channel_id, creator_id, created_at_iso, mode="DUOQ", voice_channel_id=None):
     """Registra un grupo de 'Buscar partida' recién creado, para poder
     reconstruir sus botones tras un reinicio y para el borrado automático."""
     with get_conn() as conn:
         conn.execute("""
-        INSERT INTO active_groups (thread_id, message_id, channel_id, creator_id, created_at, mode)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO active_groups (thread_id, message_id, channel_id, creator_id, created_at, mode, voice_channel_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
             message_id=excluded.message_id, channel_id=excluded.channel_id,
-            creator_id=excluded.creator_id, created_at=excluded.created_at, mode=excluded.mode
-        """, (str(thread_id), str(message_id), str(channel_id), str(creator_id), created_at_iso, mode))
+            creator_id=excluded.creator_id, created_at=excluded.created_at, mode=excluded.mode,
+            voice_channel_id=excluded.voice_channel_id
+        """, (str(thread_id), str(message_id), str(channel_id), str(creator_id), created_at_iso, mode,
+              str(voice_channel_id) if voice_channel_id else None))
 
 def get_group(thread_id):
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT thread_id, message_id, channel_id, creator_id, created_at, warned, mode "
+            "SELECT thread_id, message_id, channel_id, creator_id, created_at, warned, mode, voice_channel_id "
             "FROM active_groups WHERE thread_id=?", (str(thread_id),)
         )
         row = cur.fetchone()
     if not row:
         return None
     return {"thread_id": row[0], "message_id": row[1], "channel_id": row[2],
-            "creator_id": row[3], "created_at": row[4], "warned": bool(row[5]), "mode": row[6]}
+            "creator_id": row[3], "created_at": row[4], "warned": bool(row[5]), "mode": row[6],
+            "voice_channel_id": row[7]}
 
 def get_all_groups():
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT thread_id, message_id, channel_id, creator_id, created_at, warned, mode FROM active_groups")
+        cur.execute("SELECT thread_id, message_id, channel_id, creator_id, created_at, warned, mode, voice_channel_id FROM active_groups")
         rows = cur.fetchall()
     return [
         {"thread_id": tid, "message_id": mid, "channel_id": cid, "creator_id": crid,
-         "created_at": ca, "warned": bool(w), "mode": mode}
-        for tid, mid, cid, crid, ca, w, mode in rows
+         "created_at": ca, "warned": bool(w), "mode": mode, "voice_channel_id": vcid}
+        for tid, mid, cid, crid, ca, w, mode, vcid in rows
     ]
 
 def delete_group(thread_id):
@@ -168,3 +174,11 @@ def delete_group(thread_id):
 def mark_group_warned(thread_id):
     with get_conn() as conn:
         conn.execute("UPDATE active_groups SET warned=1 WHERE thread_id=?", (str(thread_id),))
+
+def clear_group_voice_channel(thread_id):
+    """El canal de voz de un grupo puede borrarse antes que el propio grupo
+    (queda vacío, o nadie se une nunca) — esto lo desvincula en la DB para
+    que nadie intente borrarlo otra vez más tarde (al cerrar/cancelar/
+    caducar el grupo)."""
+    with get_conn() as conn:
+        conn.execute("UPDATE active_groups SET voice_channel_id=NULL WHERE thread_id=?", (str(thread_id),))
