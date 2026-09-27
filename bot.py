@@ -2,6 +2,7 @@ import discord
 import aiohttp
 import os
 import re
+import random
 import threading
 import asyncio
 import time
@@ -18,6 +19,7 @@ from database import (
     has_linked_before, get_unlinked_tracking, get_all_unlinked_tracking,
     start_unlinked_tracking, stop_unlinked_tracking, mark_reminder_sent,
     create_group, get_group, get_all_groups, delete_group, mark_group_warned,
+    clear_group_voice_channel,
 )
 
 # ------------------ BOT ------------------
@@ -433,13 +435,22 @@ class GroupView(View):
                 thread = await thread.edit(archived=False)  # capturamos el objeto actualizado, por si acaso
             await thread.add_user(interaction.user)
 
+            group_record = get_group(thread.id)
+            mode = GAME_MODES.get(group_record["mode"], GAME_MODES["DUOQ"]) if group_record else GAME_MODES["DUOQ"]
+
+            # Si el grupo tiene canal de voz vinculado, le damos acceso también.
+            if group_record and group_record.get("voice_channel_id"):
+                voice_channel = interaction.guild.get_channel(int(group_record["voice_channel_id"]))
+                if voice_channel:
+                    try:
+                        await voice_channel.set_permissions(interaction.user, view_channel=True, connect=True)
+                    except discord.HTTPException:
+                        pass
+
             try:
                 members_after = await thread.fetch_members()
             except discord.HTTPException:
                 members_after = []
-
-            group_record = get_group(thread.id)
-            mode = GAME_MODES.get(group_record["mode"], GAME_MODES["DUOQ"]) if group_record else GAME_MODES["DUOQ"]
 
             if len(members_after) >= mode["max_members"]:
                 # Equipo completo: se cierra solo, misma lógica que "Cerrar grupo".
@@ -488,6 +499,16 @@ class GroupView(View):
                 return await interaction.followup.send("No estás en este grupo.", ephemeral=True)
 
             await thread.remove_user(interaction.user)
+
+            group_record = get_group(thread.id)
+            if group_record and group_record.get("voice_channel_id"):
+                voice_channel = interaction.guild.get_channel(int(group_record["voice_channel_id"]))
+                if voice_channel:
+                    try:
+                        await voice_channel.set_permissions(interaction.user, overwrite=None)
+                    except discord.HTTPException:
+                        pass
+
             await update_group_embed(thread)
             await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
         except Exception as e:
@@ -556,6 +577,10 @@ class GroupView(View):
                     await thread.delete()
                 except discord.HTTPException:
                     pass
+
+            group_record = get_group(self.thread_id)
+            if group_record:
+                await delete_group_voice_channel(group_record)
 
             if interaction.message:
                 try:
@@ -696,17 +721,41 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
         )
         await thread.add_user(interaction.user)
 
+        # Canal de voz temporal vinculado al grupo — privado (nadie lo ve
+        # hasta unirse al hilo), con nombre aleatorio de la lista temática,
+        # y con el mismo límite de gente que la modalidad. Se borra solo:
+        # si queda vacío (on_voice_state_update, con margen de gracia) o si
+        # nadie se une nunca (barrido periódico). Si falla, el grupo sigue
+        # funcionando igual sin voz.
+        voice_channel = None
+        try:
+            voice_overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+                interaction.user: discord.PermissionOverwrite(view_channel=True, connect=True),
+                interaction.guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True),
+            }
+            voice_channel = await interaction.guild.create_voice_channel(
+                name=random.choice(VOICE_CHANNEL_NAMES),
+                category=channel.category,
+                user_limit=mode["max_members"],
+                overwrites=voice_overwrites
+            )
+        except discord.HTTPException as e:
+            print(f"[GRUPO] No se pudo crear el canal de voz para {interaction.user}: {e}")
+
         create_group(thread.id, sent_message.id, channel.id, interaction.user.id,
-                      discord.utils.utcnow().isoformat(), mode=mode_key)
+                      discord.utils.utcnow().isoformat(), mode=mode_key,
+                      voice_channel_id=voice_channel.id if voice_channel else None)
 
         view = GroupView(thread.id, interaction.user.id)
         bot.add_view(view)
         await sent_message.edit(view=view)
         await update_group_embed(thread)  # título → "Grupo Abierto" + te añade a ti a la lista
 
+        voice_line = f" y en {voice_channel.mention} por voz" if voice_channel else ""
         await thread.send(
             f"🔒 Este es tu hilo privado, {interaction.user.mention}. Habla aquí con quien se una "
-            f"al grupo. Se eliminará automáticamente pasadas {GROUP_LIFETIME_HOURS}h."
+            f"al grupo{voice_line}. Se eliminará automáticamente pasadas {GROUP_LIFETIME_HOURS}h."
         )
         group_ready = True
     except discord.HTTPException as e:
@@ -1255,6 +1304,33 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             pass
     stop_unlinked_tracking(str(after.id))
 
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    """Si alguien sale de un canal de voz que resulta ser el de un grupo, y
+    el canal se queda vacío, lo borramos — con un margen de gracia de 60s
+    por si alguien se desconecta un momento y vuelve (corte de red, etc.),
+    en vez de borrarlo al instante."""
+    left_channel = before.channel
+    if not left_channel or left_channel == after.channel:
+        return  # no salió de ningún canal, o solo cambió de estado (mute, etc.)
+    if len(left_channel.members) > 0:
+        return  # todavía queda gente dentro, nada que hacer
+
+    group = next((g for g in get_all_groups() if g.get("voice_channel_id") == str(left_channel.id)), None)
+    if not group:
+        return  # no es un canal de voz nuestro
+
+    await asyncio.sleep(60)  # margen de gracia
+    channel_again = bot.get_channel(left_channel.id)
+    if not channel_again or len(channel_again.members) > 0:
+        return  # alguien volvió a entrar durante el margen de gracia
+
+    try:
+        await channel_again.delete()
+    except discord.HTTPException:
+        pass
+    clear_group_voice_channel(group["thread_id"])
+
 # ------------------ SINCRONIZACIÓN MANUAL ------------------
 
 @bot.tree.command(
@@ -1519,6 +1595,25 @@ async def online(interaction: discord.Interaction):
 
 # ------------------ LIMPIEZA DE GRUPOS CADUCADOS ------------------
 
+async def delete_group_voice_channel(group: dict):
+    """Borra el canal de voz vinculado a un grupo, si tiene uno. Se llama
+    solo cuando el HILO desaparece de verdad (caducidad o cancelación) —
+    nunca al 'Cerrar grupo' sin más, que deja el hilo vivo para quien ya
+    está dentro."""
+    voice_channel_id = group.get("voice_channel_id")
+    if not voice_channel_id:
+        return
+    voice_channel = bot.get_channel(int(voice_channel_id))
+    if not voice_channel:
+        try:
+            voice_channel = await bot.fetch_channel(int(voice_channel_id))
+        except discord.HTTPException:
+            return
+    try:
+        await voice_channel.delete()
+    except discord.HTTPException:
+        pass
+
 async def close_group_silently(thread: discord.Thread, group: dict):
     """Igual que GroupView._lock_group pero sin necesitar una interacción —
     para el cierre automático por caducidad, antes de borrarlo. Si el
@@ -1588,6 +1683,23 @@ async def cleanup_groups_loop():
                 created_at = created_at.replace(tzinfo=timezone.utc)
             elapsed = now - created_at
 
+            # Canal de voz que nadie ha usado nunca (0 miembros) pasado el
+            # tiempo de gracia: se borra aparte, independientemente de si el
+            # grupo en sí ya toca cerrarse o no.
+            if group.get("voice_channel_id") and elapsed >= timedelta(minutes=VOICE_EMPTY_TIMEOUT_MINUTES):
+                voice_channel = bot.get_channel(int(group["voice_channel_id"]))
+                if not voice_channel:
+                    try:
+                        voice_channel = await bot.fetch_channel(int(group["voice_channel_id"]))
+                    except discord.HTTPException:
+                        voice_channel = None
+                if voice_channel and len(voice_channel.members) == 0:
+                    try:
+                        await voice_channel.delete()
+                    except discord.HTTPException:
+                        pass
+                    clear_group_voice_channel(group["thread_id"])
+
             if elapsed >= timedelta(hours=GROUP_LIFETIME_HOURS):
                 thread = bot.get_channel(int(group["thread_id"]))
                 if not thread:
@@ -1599,13 +1711,15 @@ async def cleanup_groups_loop():
                 if thread:
                     # close_group_silently ya deja el embed en "🔴 Grupo
                     # Cerrado" y sin botones — eso se queda en el canal como
-                    # histórico. Solo se borra el HILO, nunca el mensaje.
+                    # histórico. Solo se borran el HILO y el canal de voz
+                    # vinculado, nunca el mensaje.
                     await close_group_silently(thread, group)
                     try:
                         await thread.delete()
                     except discord.HTTPException:
                         pass
 
+                await delete_group_voice_channel(group)
                 delete_group(group["thread_id"])
 
             elif elapsed >= warn_threshold and not group["warned"]:
@@ -1651,12 +1765,20 @@ async def cleanup_groups_loop_error(error: BaseException):
     name="grupos",
     description="Grupos de búsqueda abiertos ahora mismo, en cualquier modalidad."
 )
-async def grupos(interaction: discord.Interaction):
+@app_commands.describe(modo="Filtra por una modalidad concreta (opcional)")
+@app_commands.choices(modo=[
+    app_commands.Choice(name=info["label"], value=key) for key, info in GAME_MODES.items()
+])
+async def grupos(interaction: discord.Interaction, modo: app_commands.Choice[str] = None):
     await interaction.response.defer(ephemeral=True)
+    filtro = modo.value if modo else None
     guild = interaction.guild
 
     open_groups = []
     for group in get_all_groups():
+        if filtro and group["mode"] != filtro:
+            continue
+
         thread_id = int(group["thread_id"])
         thread = bot.get_channel(thread_id)
         if not thread:
@@ -1687,14 +1809,21 @@ async def grupos(interaction: discord.Interaction):
             "created_at": group["created_at"],
         })
 
-    embed = discord.Embed(title="🔎 Grupos abiertos ahora mismo", color=COLOR_GROUP_OPEN)
+    titulo_modo = f" — {GAME_MODES[filtro]['label']}" if filtro else ""
+    embed = discord.Embed(title=f"🔎 Grupos abiertos ahora mismo{titulo_modo}", color=COLOR_GROUP_OPEN)
     apply_footer(embed, guild)
 
     if not open_groups:
-        embed.description = (
-            f"No hay ningún grupo abierto ahora mismo. ¡Publica el primero en "
-            f"<#{SEARCH_PANEL_CHANNEL_ID}>!"
-        )
+        if filtro:
+            embed.description = (
+                f"No hay ningún grupo de **{GAME_MODES[filtro]['label']}** abierto ahora mismo. "
+                f"¡Publica el primero en <#{SEARCH_PANEL_CHANNEL_ID}>!"
+            )
+        else:
+            embed.description = (
+                f"No hay ningún grupo abierto ahora mismo. ¡Publica el primero en "
+                f"<#{SEARCH_PANEL_CHANNEL_ID}>!"
+            )
         return await interaction.followup.send(embed=embed, ephemeral=True)
 
     open_groups.sort(key=lambda g: g["created_at"], reverse=True)
