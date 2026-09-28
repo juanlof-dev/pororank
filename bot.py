@@ -729,10 +729,19 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
         # funcionando igual sin voz.
         voice_channel = None
         try:
-            voice_category = interaction.guild.get_channel(VOICE_CHANNEL_CATEGORY_ID)
-            if not isinstance(voice_category, discord.CategoryChannel):
-                print(f"[GRUPO] VOICE_CHANNEL_CATEGORY_ID ({VOICE_CHANNEL_CATEGORY_ID}) no es una "
-                      "categoría válida o no se encuentra; el canal de voz se creará sin categoría.")
+            reference = interaction.guild.get_channel(VOICE_CHANNEL_REFERENCE_ID)
+            place_after = None
+            if isinstance(reference, discord.CategoryChannel):
+                voice_category = reference
+            elif reference is not None:
+                # Es un canal normal: usamos su categoría y, si es de voz,
+                # luego lo colocamos justo debajo de él.
+                voice_category = reference.category
+                if isinstance(reference, discord.VoiceChannel):
+                    place_after = reference
+            else:
+                print(f"[GRUPO] VOICE_CHANNEL_REFERENCE_ID ({VOICE_CHANNEL_REFERENCE_ID}) no se "
+                      "encuentra en el servidor; el canal de voz se creará sin categoría.")
                 voice_category = None
 
             voice_overwrites = {
@@ -746,6 +755,11 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
                 user_limit=mode["max_members"],
                 overwrites=voice_overwrites
             )
+            if place_after:
+                try:
+                    await voice_channel.move(after=place_after, category=voice_category)
+                except (discord.HTTPException, ValueError) as e:
+                    print(f"[GRUPO] No se pudo colocar el canal de voz bajo el de referencia: {e}")
         except discord.HTTPException as e:
             print(f"[GRUPO] No se pudo crear el canal de voz para {interaction.user}: {e}")
 
@@ -758,10 +772,16 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
         await sent_message.edit(view=view)
         await update_group_embed(thread)  # título → "Grupo Abierto" + te añade a ti a la lista
 
-        voice_line = f" y en {voice_channel.mention} por voz" if voice_channel else ""
+        if voice_channel:
+            voice_line = f" y en {voice_channel.mention} por voz"
+            voice_warning = ""
+        else:
+            voice_line = ""
+            voice_warning = "\n⚠️ No se pudo crear el canal de voz (revisa el permiso **Gestionar canales** del bot)."
         await thread.send(
             f"🔒 Este es tu hilo privado, {interaction.user.mention}. Habla aquí con quien se una "
             f"al grupo{voice_line}. Se eliminará automáticamente pasadas {GROUP_LIFETIME_HOURS}h."
+            f"{voice_warning}"
         )
         group_ready = True
     except discord.HTTPException as e:
