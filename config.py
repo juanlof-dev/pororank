@@ -187,10 +187,12 @@ VOICE_CHANNEL_NAMES = [
 # margen de gracia de 60s (ver on_voice_state_update en bot.py).
 VOICE_EMPTY_TIMEOUT_MINUTES = 15
 
-# 📌 Categoría bajo la que se crean todos los canales de voz temporales de
-# los grupos, independientemente de en qué canal/categoría viva el texto
-# de esa modalidad.
-VOICE_CHANNEL_CATEGORY_ID = 1547249351456456706
+# 📌 Canal de referencia para los canales de voz temporales de los grupos.
+# Puede ser una CATEGORÍA (los canales se crean dentro de ella) o un CANAL
+# normal (se crean en su misma categoría, justo debajo de él si es de voz;
+# si es de texto, Discord siempre lista los de voz por debajo de los de
+# texto dentro de una categoría).
+VOICE_CHANNEL_REFERENCE_ID = 1547249351456456706
 
 # 📌 Modalidades de juego para "Buscar partida". DUOQ es un caso especial:
 # usa el sistema de 11 canales por tier de SoloQ que ya existe
