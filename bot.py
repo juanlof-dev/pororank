@@ -342,13 +342,25 @@ async def update_group_embed(thread: discord.Thread):
     embed.title = f"🔴 Grupo Cerrado {contador}" if thread.locked else f"🟢 Grupo Abierto {contador}"
     embed.color = COLOR_GROUP_CLOSED if thread.locked else COLOR_GROUP_OPEN
 
-    # Quitamos cualquier campo "JUGADORES" de una actualización anterior
-    # para no duplicarlo (el resto del embed vive en la descripción, no en
-    # campos, así que no hay nada más que conservar aparte de este campo).
-    kept_fields = [f for f in embed.fields if f.name != "👥 JUGADORES"]
+    # Quitamos cualquier campo "JUGADORES" o "Sala de voz" de una
+    # actualización anterior para no duplicarlos (el resto del embed vive
+    # en la descripción, no en campos, así que no hay nada más que
+    # conservar aparte de estos dos).
+    kept_fields = [f for f in embed.fields if f.name not in ("👥 JUGADORES", "🔊 Sala de voz")]
     embed.clear_fields()
     for f in kept_fields:
         embed.add_field(name=f.name, value=f.value, inline=f.inline)
+
+    voice_channel_id = group.get("voice_channel_id")
+    if voice_channel_id:
+        voice_channel = guild.get_channel(int(voice_channel_id))
+        if voice_channel:
+            embed.add_field(
+                name="🔊 Sala de voz",
+                value=f"**{voice_channel.name}** · se desbloquea al unirte al grupo",
+                inline=False
+            )
+
     if lines:
         embed.add_field(name="👥 JUGADORES", value="\n".join(lines), inline=False)
 
@@ -356,6 +368,18 @@ async def update_group_embed(thread: discord.Thread):
         await message.edit(embed=embed)
     except discord.HTTPException:
         pass
+
+def voice_join_view(voice_channel, guild_id: int):
+    """Vista de un solo botón de enlace a la sala de voz del grupo, o None
+    si el grupo no tiene canal de voz (para no adjuntar una vista vacía)."""
+    if not voice_channel:
+        return None
+    view = View()
+    view.add_item(discord.ui.Button(
+        label=f"Ir a {voice_channel.name}", emoji="🔊", style=discord.ButtonStyle.link,
+        url=f"https://discord.com/channels/{guild_id}/{voice_channel.id}"
+    ))
+    return view
 
 class GroupView(View):
     """Vista dinámica del grupo: Unirse / Salir del grupo / Cerrar grupo.
@@ -439,6 +463,7 @@ class GroupView(View):
             mode = GAME_MODES.get(group_record["mode"], GAME_MODES["DUOQ"]) if group_record else GAME_MODES["DUOQ"]
 
             # Si el grupo tiene canal de voz vinculado, le damos acceso también.
+            voice_channel = None
             if group_record and group_record.get("voice_channel_id"):
                 voice_channel = interaction.guild.get_channel(int(group_record["voice_channel_id"]))
                 if voice_channel:
@@ -446,6 +471,7 @@ class GroupView(View):
                         await voice_channel.set_permissions(interaction.user, view_channel=True, connect=True)
                     except discord.HTTPException:
                         pass
+            voice_view = voice_join_view(voice_channel, interaction.guild.id)
 
             try:
                 members_after = await thread.fetch_members()
@@ -467,12 +493,13 @@ class GroupView(View):
                         pass
                 await interaction.followup.send(
                     f"✅ Te has unido al grupo — ¡equipo completo! Habla con ellos en {thread.mention}.",
-                    ephemeral=True
+                    view=voice_view, ephemeral=True
                 )
             else:
                 await update_group_embed(thread)
                 await interaction.followup.send(
-                    f"✅ Te has unido al grupo. Habla con ellos en {thread.mention}.", ephemeral=True
+                    f"✅ Te has unido al grupo. Habla con ellos en {thread.mention}.",
+                    view=voice_view, ephemeral=True
                 )
         except Exception as e:
             print(f"[GRUPO] Error en 'Unirse': {type(e).__name__}: {e}")
@@ -791,6 +818,7 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
     if group_ready:
         await interaction.followup.send(
             f"✅ Aviso de **{mode['label']}** publicado en {channel.mention}. ¡Suerte encontrando partida!",
+            view=voice_join_view(voice_channel, interaction.guild.id),
             ephemeral=True
         )
     else:
@@ -1357,6 +1385,15 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         pass
     clear_group_voice_channel(group["thread_id"])
 
+    thread = bot.get_channel(int(group["thread_id"]))
+    if not thread:
+        try:
+            thread = await bot.fetch_channel(int(group["thread_id"]))
+        except discord.HTTPException:
+            thread = None
+    if thread:
+        await update_group_embed(thread)  # quita el campo "Sala de voz" ya mismo, no en el próximo join/leave
+
 # ------------------ SINCRONIZACIÓN MANUAL ------------------
 
 @bot.tree.command(
@@ -1725,6 +1762,15 @@ async def cleanup_groups_loop():
                     except discord.HTTPException:
                         pass
                     clear_group_voice_channel(group["thread_id"])
+
+                    sweep_thread = bot.get_channel(int(group["thread_id"]))
+                    if not sweep_thread:
+                        try:
+                            sweep_thread = await bot.fetch_channel(int(group["thread_id"]))
+                        except discord.HTTPException:
+                            sweep_thread = None
+                    if sweep_thread:
+                        await update_group_embed(sweep_thread)  # quita el campo "Sala de voz" ya mismo
 
             if elapsed >= timedelta(hours=GROUP_LIFETIME_HOURS):
                 thread = bot.get_channel(int(group["thread_id"]))
