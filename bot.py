@@ -381,6 +381,33 @@ def voice_join_view(voice_channel, guild_id: int):
     ))
     return view
 
+async def refresh_group_buttons(thread: discord.Thread, group: dict):
+    """Reconstruye los botones del mensaje del grupo leyendo el estado
+    actual de la DB (por ejemplo, tras borrarse la sala de voz, para quitar
+    el botón 'Voz' que ya no llevaría a ningún sitio). No hace nada si el
+    grupo ya está cerrado — ese mensaje ya se quedó sin botones."""
+    if thread.locked:
+        return
+    channel = bot.get_channel(int(group["channel_id"]))
+    if not channel:
+        try:
+            channel = await bot.fetch_channel(int(group["channel_id"]))
+        except discord.HTTPException:
+            return
+    try:
+        message = await channel.fetch_message(int(group["message_id"]))
+    except discord.HTTPException:
+        return
+
+    fresh = get_group(group["thread_id"])
+    voice_id = int(fresh["voice_channel_id"]) if fresh and fresh.get("voice_channel_id") else None
+    view = GroupView(int(group["thread_id"]), int(group["creator_id"]), voice_id, thread.guild.id)
+    bot.add_view(view)
+    try:
+        await message.edit(view=view)
+    except discord.HTTPException:
+        pass
+
 class GroupView(View):
     """Vista dinámica del grupo: Unirse / Salir del grupo / Cerrar grupo.
     Los custom_id llevan el thread_id (y el creator_id en 'cerrar') dentro,
@@ -388,7 +415,7 @@ class GroupView(View):
     funcionando tras un reinicio — solo hay que volver a registrar esta
     vista al arrancar (ver reregister_group_views)."""
 
-    def __init__(self, thread_id: int, creator_id: int):
+    def __init__(self, thread_id: int, creator_id: int, voice_channel_id: int = None, guild_id: int = None):
         super().__init__(timeout=None)
         self.thread_id = thread_id
         self.creator_id = creator_id
@@ -420,6 +447,17 @@ class GroupView(View):
         )
         cancel_btn.callback = self.cancel_search
         self.add_item(cancel_btn)
+
+        # Botón de enlace a la sala de voz — solo si el grupo tiene una. Es
+        # de tipo "link" (no custom_id, no pasa por nuestro callback), así
+        # que no necesita que nadie tenga ya acceso: Discord gestiona el
+        # permiso al pulsar. Se quita solo si la sala se borra (ver
+        # refresh_group_buttons).
+        if voice_channel_id and guild_id:
+            self.add_item(discord.ui.Button(
+                label="Voz", emoji="🔊", style=discord.ButtonStyle.link,
+                url=f"https://discord.com/channels/{guild_id}/{voice_channel_id}"
+            ))
 
     async def _get_thread(self, interaction: discord.Interaction):
         thread = interaction.guild.get_channel_or_thread(self.thread_id)
@@ -794,7 +832,8 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
                       discord.utils.utcnow().isoformat(), mode=mode_key,
                       voice_channel_id=voice_channel.id if voice_channel else None)
 
-        view = GroupView(thread.id, interaction.user.id)
+        view = GroupView(thread.id, interaction.user.id,
+                         voice_channel.id if voice_channel else None, interaction.guild.id)
         bot.add_view(view)
         await sent_message.edit(view=view)
         await update_group_embed(thread)  # título → "Grupo Abierto" + te añade a ti a la lista
@@ -1393,6 +1432,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             thread = None
     if thread:
         await update_group_embed(thread)  # quita el campo "Sala de voz" ya mismo, no en el próximo join/leave
+        await refresh_group_buttons(thread, group)  # quita el botón "Voz" del mensaje
 
 # ------------------ SINCRONIZACIÓN MANUAL ------------------
 
@@ -1723,7 +1763,9 @@ async def reregister_group_views():
             if thread and thread.locked:
                 continue
 
-            view = GroupView(thread_id, int(group["creator_id"]))
+            voice_id = int(group["voice_channel_id"]) if group.get("voice_channel_id") else None
+            guild_id = thread.guild.id if thread else None
+            view = GroupView(thread_id, int(group["creator_id"]), voice_id, guild_id)
             bot.add_view(view)
         except Exception as e:
             print(f"[GRUPO] Error re-registrando el grupo {group.get('thread_id')}: {type(e).__name__}: {e}")
@@ -1771,6 +1813,7 @@ async def cleanup_groups_loop():
                             sweep_thread = None
                     if sweep_thread:
                         await update_group_embed(sweep_thread)  # quita el campo "Sala de voz" ya mismo
+                        await refresh_group_buttons(sweep_thread, group)  # quita el botón "Voz" del mensaje
 
             if elapsed >= timedelta(hours=GROUP_LIFETIME_HOURS):
                 thread = bot.get_channel(int(group["thread_id"]))
