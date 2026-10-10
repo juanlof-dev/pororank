@@ -540,10 +540,10 @@ class GroupView(View):
                 if await self._lock_group(thread, interaction):
                     try:
                         full_embed = apply_footer(discord.Embed(
-                            title="🔒 Grupo cerrado",
-                            description="Este grupo ha llegado a su tamaño completo y se ha cerrado "
-                                        "automáticamente. Ya no se admiten nuevos jugadores.",
-                            color=COLOR_GROUP_CLOSED
+                            title="🔒 Grupo completo",
+                            description="¡Equipo al completo! El grupo se ha cerrado automáticamente "
+                                        "y ya no admite más jugadores. ¡A jugar!",
+                            color=COLOR_GROUP_FULL
                         ), thread.guild)
                         await thread.send(embed=full_embed, allowed_mentions=discord.AllowedMentions.none())
                     except discord.HTTPException:
@@ -1619,7 +1619,7 @@ async def servidor(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📊 COMPOSICIÓN DEL SERVIDOR",
         description=f"👥 {total_miembros} miembros",
-        color=0x5865F2
+        color=COLOR_PANEL
     )
 
     # 🔗 Vinculación
@@ -1706,7 +1706,7 @@ async def online(interaction: discord.Interaction):
             lane_counts.append((label, count))
 
     total = len(online_ids)
-    embed = discord.Embed(title="🟢 JUGADORES ONLINE", color=0x57F287)
+    embed = discord.Embed(title="🟢 JUGADORES ONLINE", color=COLOR_GROUP_OPEN)
     apply_footer(embed, guild)
 
     if total == 0:
@@ -1883,7 +1883,7 @@ async def cleanup_groups_loop():
                                 f"{GROUP_WARNING_MINUTES} minutos para evitar saturar el servidor.\n\n"
                                 "Si vais a jugar, ¡es un buen momento para organizaros!"
                             ),
-                            color=COLOR_GROUP_CLOSED
+                            color=COLOR_VERIFICATION
                         ), thread.guild)
                         await thread.send(embed=warn_embed, allowed_mentions=discord.AllowedMentions.none())
                     except discord.HTTPException:
@@ -1972,10 +1972,21 @@ async def grupos(interaction: discord.Interaction, modo: app_commands.Choice[str
         return await interaction.followup.send(embed=embed, ephemeral=True)
 
     open_groups.sort(key=lambda g: g["created_at"], reverse=True)
-    embed.description = "\n".join(
-        f"🎮 **{g['mode_label']}** · {g['creator_name']} · {g['count']}/{g['max']} · [Ver mensaje]({g['url']})"
-        for g in open_groups
-    )
+    def _group_line(g):
+        free = max(g["max"] - g["count"], 0)
+        dots = " ".join("●" * min(g["count"], g["max"]) + "○" * free)
+        falta = " · **¡Falta 1!**" if free == 1 else ""
+        try:
+            created = datetime.fromisoformat(g["created_at"])
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            cierra = f" · cierra <t:{int((created + timedelta(hours=GROUP_LIFETIME_HOURS)).timestamp())}:R>"
+        except (ValueError, TypeError):
+            cierra = ""
+        return (f"🎮 **{g['mode_label']}** · {g['creator_name']}\n"
+                f"`{dots}` {g['count']}/{g['max']}{falta}{cierra} · [Ver aviso]({g['url']})")
+
+    embed.description = "\n\n".join(_group_line(g) for g in open_groups)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -2000,7 +2011,7 @@ async def ultimos(interaction: discord.Interaction):
     now = discord.utils.utcnow()
     lines = []
     for member in ultimos_miembros:
-        tiempo = humanize_delta(now - member.joined_at)
+        tiempo = f"<t:{int(member.joined_at.timestamp())}:R>"
         # Vinculado si NO tiene el rol "Sin vincular" — coherente con cómo
         # el resto del bot determina el estado de vinculación.
         vinculado = not any(r.id == UNLINKED_ROLE_ID for r in member.roles)
@@ -2009,8 +2020,8 @@ async def ultimos(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="🕐 ÚLTIMOS EN LLEGAR",
-        description=f"Últimos {len(ultimos_miembros)} miembros\n\n" + "\n".join(lines),
-        color=0x5865F2
+        description=f"Últimos {len(ultimos_miembros)} miembros · 🟢 vinculado · 🔴 sin vincular\n\n" + "\n".join(lines),
+        color=COLOR_PANEL
     )
     apply_footer(embed, guild)
 
@@ -2052,7 +2063,7 @@ async def send_unlinked_reminder(member: discord.Member, guild: discord.Guild, s
                 "📍 Puedes hacerlo en cualquier momento desde el canal de vinculación del servidor.\n\n"
                 "*Mensaje automático · se envía una sola vez*"
             ),
-            color=0xF1C40F
+            color=COLOR_VERIFICATION
         )
     else:
         embed = discord.Embed(
