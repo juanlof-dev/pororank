@@ -342,24 +342,26 @@ async def update_group_embed(thread: discord.Thread):
     embed.title = f"🔴 Grupo Cerrado {contador}" if thread.locked else f"🟢 Grupo Abierto {contador}"
     embed.color = COLOR_GROUP_CLOSED if thread.locked else COLOR_GROUP_OPEN
 
-    # Quitamos cualquier campo "JUGADORES" o "Sala de voz" de una
-    # actualización anterior para no duplicarlos (el resto del embed vive
-    # en la descripción, no en campos, así que no hay nada más que
-    # conservar aparte de estos dos).
+    # Quitamos cualquier campo "JUGADORES" de una actualización anterior
+    # para no duplicarlo. "🔊 Sala de voz" ya no se usa como campo (ahora
+    # va en la descripción), pero lo seguimos filtrando aquí para limpiar
+    # los mensajes de grupos creados con la versión anterior.
     kept_fields = [f for f in embed.fields if f.name not in ("👥 JUGADORES", "🔊 Sala de voz")]
     embed.clear_fields()
     for f in kept_fields:
         embed.add_field(name=f.name, value=f.value, inline=f.inline)
 
+    # La sala de voz va como último párrafo de la descripción: es un único
+    # dato, y así queda cohesionada con el resto del bloque de info (lane,
+    # rango, "Buscando jugadores…"). Quitamos cualquier párrafo de sala de
+    # voz previo y lo volvemos a añadir solo si la sala sigue existiendo.
+    paragraphs = [p for p in (embed.description or "").split("\n\n") if p and not p.startswith("🔊 ")]
     voice_channel_id = group.get("voice_channel_id")
     if voice_channel_id:
         voice_channel = guild.get_channel(int(voice_channel_id))
         if voice_channel:
-            embed.add_field(
-                name="🔊 Sala de voz",
-                value=f"**{voice_channel.name}** · se desbloquea al unirte al grupo",
-                inline=False
-            )
+            paragraphs.append(f"🔊 {voice_channel.name} · *abierta a cuentas vinculadas*")
+    embed.description = "\n\n".join(paragraphs)
 
     if lines:
         embed.add_field(name="👥 JUGADORES", value="\n".join(lines), inline=False)
@@ -420,33 +422,20 @@ class GroupView(View):
         self.thread_id = thread_id
         self.creator_id = creator_id
 
+        # Fila 0: acciones de cualquier miembro del grupo.
         join_btn = discord.ui.Button(
             label="Unirse", emoji="✅", style=discord.ButtonStyle.success,
-            custom_id=f"group_join:{thread_id}"
+            custom_id=f"group_join:{thread_id}", row=0
         )
         join_btn.callback = self.join
         self.add_item(join_btn)
 
         leave_btn = discord.ui.Button(
             label="Salir del grupo", emoji="🚪", style=discord.ButtonStyle.secondary,
-            custom_id=f"group_leave:{thread_id}"
+            custom_id=f"group_leave:{thread_id}", row=0
         )
         leave_btn.callback = self.leave
         self.add_item(leave_btn)
-
-        close_btn = discord.ui.Button(
-            label="Cerrar grupo", emoji="🔒", style=discord.ButtonStyle.danger,
-            custom_id=f"group_close:{thread_id}:{creator_id}"
-        )
-        close_btn.callback = self.close_group
-        self.add_item(close_btn)
-
-        cancel_btn = discord.ui.Button(
-            label="Cancelar búsqueda", emoji="🗑️", style=discord.ButtonStyle.secondary,
-            custom_id=f"group_cancel:{thread_id}:{creator_id}"
-        )
-        cancel_btn.callback = self.cancel_search
-        self.add_item(cancel_btn)
 
         # Botón de enlace a la sala de voz — solo si el grupo tiene una. Es
         # de tipo "link" (no custom_id, no pasa por nuestro callback), así
@@ -455,9 +444,24 @@ class GroupView(View):
         # refresh_group_buttons).
         if voice_channel_id and guild_id:
             self.add_item(discord.ui.Button(
-                label="Voz", emoji="🔊", style=discord.ButtonStyle.link,
+                label="Voz", emoji="🔊", style=discord.ButtonStyle.link, row=0,
                 url=f"https://discord.com/channels/{guild_id}/{voice_channel_id}"
             ))
+
+        # Fila 1: solo el creador, y son destructivas — separadas a propósito.
+        close_btn = discord.ui.Button(
+            label="Cerrar grupo", emoji="🔒", style=discord.ButtonStyle.danger,
+            custom_id=f"group_close:{thread_id}:{creator_id}", row=1
+        )
+        close_btn.callback = self.close_group
+        self.add_item(close_btn)
+
+        cancel_btn = discord.ui.Button(
+            label="Cancelar búsqueda", emoji="🗑️", style=discord.ButtonStyle.secondary,
+            custom_id=f"group_cancel:{thread_id}:{creator_id}", row=1
+        )
+        cancel_btn.callback = self.cancel_search
+        self.add_item(cancel_btn)
 
     async def _get_thread(self, interaction: discord.Interaction):
         thread = interaction.guild.get_channel_or_thread(self.thread_id)
@@ -504,11 +508,6 @@ class GroupView(View):
             voice_channel = None
             if group_record and group_record.get("voice_channel_id"):
                 voice_channel = interaction.guild.get_channel(int(group_record["voice_channel_id"]))
-                if voice_channel:
-                    try:
-                        await voice_channel.set_permissions(interaction.user, view_channel=True, connect=True)
-                    except discord.HTTPException:
-                        pass
             voice_view = voice_join_view(voice_channel, interaction.guild.id)
 
             try:
@@ -564,15 +563,6 @@ class GroupView(View):
                 return await interaction.followup.send("No estás en este grupo.", ephemeral=True)
 
             await thread.remove_user(interaction.user)
-
-            group_record = get_group(thread.id)
-            if group_record and group_record.get("voice_channel_id"):
-                voice_channel = interaction.guild.get_channel(int(group_record["voice_channel_id"]))
-                if voice_channel:
-                    try:
-                        await voice_channel.set_permissions(interaction.user, overwrite=None)
-                    except discord.HTTPException:
-                        pass
 
             await update_group_embed(thread)
             await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
@@ -786,7 +776,7 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
         )
         await thread.add_user(interaction.user)
 
-        # Canal de voz temporal vinculado al grupo — privado (nadie lo ve
+        # Canal de voz temporal vinculado al grupo — abierto a cuentas vinculadas (lo ven
         # hasta unirse al hilo), con nombre aleatorio de la lista temática,
         # y con el mismo límite de gente que la modalidad. Se borra solo:
         # si queda vacío (on_voice_state_update, con margen de gracia) o si
@@ -812,8 +802,15 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
             voice_overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
                 interaction.user: discord.PermissionOverwrite(view_channel=True, connect=True),
-                interaction.guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True),
             }
+            # Visible y accesible para cualquiera con cuenta vinculada (roles de región).
+            for _r in REGIONS.values():
+                _role = interaction.guild.get_role(_r[2])
+                if _role:
+                    voice_overwrites[_role] = discord.PermissionOverwrite(view_channel=True, connect=True)
+            voice_overwrites.update({
+                interaction.guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True),
+            })
             voice_channel = await interaction.guild.create_voice_channel(
                 name=random.choice(VOICE_CHANNEL_NAMES),
                 category=voice_category,
