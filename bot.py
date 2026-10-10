@@ -35,6 +35,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 COLOR_PANEL = 0x9B59B6        # 🟣 Morado — acciones principales / paneles
 COLOR_GROUP_OPEN = 0x2ECC71   # 🟢 Verde — búsqueda/grupo activo
 COLOR_GROUP_CLOSED = 0xE74C3C # 🔴 Rojo — cerrado/error
+COLOR_GROUP_FULL = 0xE67E22   # 🟠 Naranja — grupo completo
+COLOR_GROUP_EXPIRED = 0x95A5A6 # ⚪ Gris — grupo caducado
 COLOR_VERIFICATION = 0xF1C40F # 🟡 Dorado — verificación
 COLOR_ACCOUNT_INFO = 0x2C2F33 # ⚫ Oscuro — información de cuenta
 
@@ -272,17 +274,16 @@ def humanize_delta(delta):
         return "ayer"
     return f"hace {days} días"
 
-def build_search_embed(creator: discord.abc.User, lane_display, rank_line, bottom_line, thumbnail_tier=None):
+def build_search_embed(creator: discord.abc.User, lane_display, rank_fields, bottom_line, thumbnail_tier=None):
+    """Embed compacto: posición y rangos en columnas (campos inline) y la
+    línea de 'Buscando…' como descripción."""
     embed = discord.Embed(title="🟢 Grupo Abierto", color=COLOR_GROUP_OPEN)
     embed.set_author(name=creator.display_name, icon_url=creator.display_avatar.url)
-
-    parts = []
+    embed.description = bottom_line
     if lane_display:
-        parts.append(lane_display)
-    if rank_line:
-        parts.append(rank_line)
-    parts.append(bottom_line)
-    embed.description = "\n\n".join(parts)
+        embed.add_field(name="Posición", value=lane_display, inline=True)
+    for name, value in rank_fields:
+        embed.add_field(name=name, value=value, inline=True)
 
     if thumbnail_tier:
         thumb = tier_thumbnail_url(thumbnail_tier)
@@ -291,7 +292,7 @@ def build_search_embed(creator: discord.abc.User, lane_display, rank_line, botto
     embed.timestamp = discord.utils.utcnow()  # Discord lo traduce solo a "hace X min" y se conserva al clonar
     return embed
 
-async def update_group_embed(thread: discord.Thread):
+async def update_group_embed(thread: discord.Thread, expired: bool = False):
     """Reconstruye el embed del grupo a partir del propio hilo (fuente de
     verdad): quién está dentro (thread.fetch_members()) y si está cerrado
     (thread.locked). No guardamos la lista de miembros en ningún sitio
@@ -338,9 +339,17 @@ async def update_group_embed(thread: discord.Thread):
             lines.append(f"{marker} {member.display_name} · SoloQ {solo_display}")
 
     embed = discord.Embed.from_dict(message.embeds[0].to_dict()) if message.embeds else discord.Embed()
-    contador = f"({len(lines)}/{mode['max_members']})"
-    embed.title = f"🔴 Grupo Cerrado {contador}" if thread.locked else f"🟢 Grupo Abierto {contador}"
-    embed.color = COLOR_GROUP_CLOSED if thread.locked else COLOR_GROUP_OPEN
+    max_m = mode["max_members"]
+    count = len(lines)
+    contador = f"({count}/{max_m})"
+    if thread.locked and expired:
+        embed.title, embed.color = f"⌛ Grupo Caducado {contador}", COLOR_GROUP_EXPIRED
+    elif thread.locked and count >= max_m:
+        embed.title, embed.color = f"🔒 Grupo Completo {contador}", COLOR_GROUP_FULL
+    elif thread.locked:
+        embed.title, embed.color = f"🔴 Grupo Cerrado {contador}", COLOR_GROUP_CLOSED
+    else:
+        embed.title, embed.color = f"🟢 Grupo Abierto {contador}", COLOR_GROUP_OPEN
 
     # Quitamos cualquier campo "JUGADORES" de una actualización anterior
     # para no duplicarlo. "🔊 Sala de voz" ya no se usa como campo (ahora
@@ -355,7 +364,22 @@ async def update_group_embed(thread: discord.Thread):
     # dato, y así queda cohesionada con el resto del bloque de info (lane,
     # rango, "Buscando jugadores…"). Quitamos cualquier párrafo de sala de
     # voz previo y lo volvemos a añadir solo si la sala sigue existiendo.
-    paragraphs = [p for p in (embed.description or "").split("\n\n") if p and not p.startswith("🔊 ")]
+    paragraphs = [p for p in (embed.description or "").split("\n\n")
+                  if p and not p.startswith(("🔊 ", "🎟️ ", "⏳ "))]
+    # Plazas visuales: ● ocupadas, ○ libres.
+    if not thread.locked:
+        free = max(max_m - count, 0)
+        plazas = "●" * min(count, max_m) + "○" * free
+        extra = " · **¡Falta 1!**" if free == 1 else ""
+        paragraphs.append(f"🎟️ `{' '.join(plazas)}` {count}/{max_m}{extra}")
+        try:
+            created = datetime.fromisoformat(group["created_at"])
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            end_ts = int((created + timedelta(hours=GROUP_LIFETIME_HOURS)).timestamp())
+            paragraphs.append(f"⏳ Se cierra <t:{end_ts}:R>")
+        except (ValueError, TypeError, KeyError):
+            pass
     voice_channel_id = group.get("voice_channel_id")
     if voice_channel_id:
         voice_channel = guild.get_channel(int(voice_channel_id))
@@ -478,24 +502,20 @@ class GroupView(View):
             uid = str(interaction.user.id)
             primary = get_effective_primary(uid, interaction.user)
             if not primary:
-                return await interaction.followup.send(
-                    "❌ Necesitas tener una cuenta vinculada para unirte a un grupo.", ephemeral=True
-                )
+                return await send_notice(interaction, "warn", "❌ Necesitas tener una cuenta vinculada para unirte a un grupo.")
 
             thread = await self._get_thread(interaction)
             if not thread:
-                return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
+                return await send_notice(interaction, "warn", "❌ Este grupo ya no existe.")
             if thread.locked:
-                return await interaction.followup.send(
-                    "🔒 Este grupo está cerrado, no admite más gente.", ephemeral=True
-                )
+                return await send_notice(interaction, "info", "🔒 Este grupo está cerrado, no admite más gente.")
 
             try:
                 members = await thread.fetch_members()
             except discord.HTTPException:
                 members = []
             if interaction.user.id in [m.id for m in members]:
-                return await interaction.followup.send("Ya estás en este grupo.", ephemeral=True)
+                return await send_notice(interaction, "info", "ℹ️ Ya estás en este grupo.")
 
             if thread.archived:
                 thread = await thread.edit(archived=False)  # capturamos el objeto actualizado, por si acaso
@@ -528,16 +548,14 @@ class GroupView(View):
                         await thread.send(embed=full_embed, allowed_mentions=discord.AllowedMentions.none())
                     except discord.HTTPException:
                         pass
-                await interaction.followup.send(
+                await send_notice(interaction, "ok",
                     f"✅ Te has unido al grupo — ¡equipo completo! Habla con ellos en {thread.mention}.",
-                    view=voice_view, ephemeral=True
-                )
+                    view=voice_view)
             else:
                 await update_group_embed(thread)
-                await interaction.followup.send(
+                await send_notice(interaction, "ok",
                     f"✅ Te has unido al grupo. Habla con ellos en {thread.mention}.",
-                    view=voice_view, ephemeral=True
-                )
+                    view=voice_view)
         except Exception as e:
             print(f"[GRUPO] Error en 'Unirse': {type(e).__name__}: {e}")
             await send_error(interaction, f"Ha ocurrido un error inesperado ({type(e).__name__}).")
@@ -546,26 +564,24 @@ class GroupView(View):
         await interaction.response.defer(ephemeral=True)
         try:
             if interaction.user.id == self.creator_id:
-                return await interaction.followup.send(
-                    "Eres el creador del grupo — usa **Cerrar grupo** si quieres dejar de admitir gente.",
-                    ephemeral=True
-                )
+                return await send_notice(interaction, "info",
+                    "ℹ️ Eres el creador del grupo — usa **Cerrar grupo** si quieres dejar de admitir gente.")
 
             thread = await self._get_thread(interaction)
             if not thread:
-                return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
+                return await send_notice(interaction, "warn", "❌ Este grupo ya no existe.")
 
             try:
                 members = await thread.fetch_members()
             except discord.HTTPException:
                 members = []
             if interaction.user.id not in [m.id for m in members]:
-                return await interaction.followup.send("No estás en este grupo.", ephemeral=True)
+                return await send_notice(interaction, "info", "ℹ️ No estás en este grupo.")
 
             await thread.remove_user(interaction.user)
 
             await update_group_embed(thread)
-            await interaction.followup.send("🚪 Has salido del grupo.", ephemeral=True)
+            await send_notice(interaction, "ok", "🚪 Has salido del grupo.")
         except Exception as e:
             print(f"[GRUPO] Error en 'Salir': {type(e).__name__}: {e}")
             await send_error(interaction, f"Ha ocurrido un error inesperado ({type(e).__name__}).")
@@ -599,17 +615,17 @@ class GroupView(View):
         await interaction.response.defer(ephemeral=True)
         try:
             if interaction.user.id != self.creator_id:
-                return await interaction.followup.send("Solo el creador del grupo puede cerrarlo.", ephemeral=True)
+                return await send_notice(interaction, "warn", "⚠️ Solo el creador del grupo puede cerrarlo.")
 
             thread = await self._get_thread(interaction)
             if not thread:
-                return await interaction.followup.send("❌ Este grupo ya no existe.", ephemeral=True)
+                return await send_notice(interaction, "warn", "❌ Este grupo ya no existe.")
             if thread.locked:
-                return await interaction.followup.send("Este grupo ya estaba cerrado.", ephemeral=True)
+                return await send_notice(interaction, "info", "ℹ️ Este grupo ya estaba cerrado.")
 
             if not await self._lock_group(thread, interaction):
                 return  # _lock_group ya avisó del motivo del fallo
-            await interaction.followup.send("🔒 Grupo cerrado. Ya no se admite gente nueva.", ephemeral=True)
+            await send_notice(interaction, "ok", "🔒 Grupo cerrado. Ya no se admite gente nueva.")
         except Exception as e:
             print(f"[GRUPO] Error en 'Cerrar grupo': {type(e).__name__}: {e}")
             await send_error(interaction, f"Ha ocurrido un error inesperado ({type(e).__name__}).")
@@ -622,9 +638,7 @@ class GroupView(View):
         await interaction.response.defer(ephemeral=True)
         try:
             if interaction.user.id != self.creator_id:
-                return await interaction.followup.send(
-                    "Solo el creador de la búsqueda puede cancelarla.", ephemeral=True
-                )
+                return await send_notice(interaction, "warn", "⚠️ Solo el creador de la búsqueda puede cancelarla.")
 
             thread = await self._get_thread(interaction)
             if thread:
@@ -644,12 +658,19 @@ class GroupView(View):
                     pass
 
             delete_group(str(self.thread_id))
-            await interaction.followup.send(
-                "🗑️ Búsqueda cancelada. Se ha eliminado el hilo y el aviso del canal.", ephemeral=True
-            )
+            await send_notice(interaction, "ok", "🗑️ Búsqueda cancelada. Se ha eliminado el hilo y el aviso del canal.")
         except Exception as e:
             print(f"[GRUPO] Error en 'Cancelar búsqueda': {type(e).__name__}: {e}")
             await send_error(interaction, f"Ha ocurrido un error inesperado ({type(e).__name__}).")
+
+async def send_notice(interaction: discord.Interaction, kind: str, text: str, view=None):
+    """Respuesta efímera uniforme para avisos normales (no errores de
+    infraestructura): kind = 'ok' (verde), 'info' (morado) o 'warn' (amarillo).
+    El icono va en el propio texto que se pasa."""
+    color = {"ok": COLOR_GROUP_OPEN, "info": COLOR_PANEL, "warn": COLOR_VERIFICATION}.get(kind, COLOR_PANEL)
+    embed = discord.Embed(description=text, color=color)
+    kwargs = {"view": view} if view is not None else {}
+    await interaction.followup.send(embed=embed, ephemeral=True, **kwargs)
 
 async def send_error(interaction: discord.Interaction, detail: str):
     """Mensaje de error estandarizado para fallos de INFRAESTRUCTURA (algo
@@ -705,7 +726,7 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
 
     # ---------- Canal, menciones, texto de rango y miniatura según el modo ----------
     role_mentions = []
-    rank_line = None
+    rank_fields = []
     thumbnail_tier = None
 
     if mode_key == "DUOQ":
@@ -725,7 +746,7 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
         # Texto "Platino / Oro": el propio tier primero, luego el/los vecinos
         # más bajos (window_tiers está guardado de menor a mayor en config.py).
         window_text = " / ".join(TIER_DISPLAY_ES.get(t, t) for t in reversed(window_tiers))
-        rank_line = f"{format_tier_display(solo_tier)} · {format_tier_display(flex_tier)} Flex"
+        rank_fields = [("SoloQ", format_tier_display(solo_tier)), ("FlexQ", format_tier_display(flex_tier))]
         bottom_line = f"👥 Buscando jugadores de {window_text}"
         thumbnail_tier = solo_tier
     else:
@@ -737,17 +758,17 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
             )
 
         if mode["rank_source"] == "flex":
-            rank_line = f"{format_tier_display(flex_tier)} FlexQ"
+            rank_fields = [("FlexQ", format_tier_display(flex_tier))]
             thumbnail_tier = flex_tier
         elif mode["rank_source"] == "solo_ref":
-            rank_line = f"{format_tier_display(solo_tier)} SoloQ (referencia)"
+            rank_fields = [("SoloQ (ref.)", format_tier_display(solo_tier))]
             thumbnail_tier = solo_tier
         # rank_source None: no se muestra ningún rango
 
         bottom_line = f"👥 Buscando jugadores para {mode['label']}"
 
     lane_display = get_lane_display(lane_role) if lane_role else None
-    embed = build_search_embed(interaction.user, lane_display, rank_line, bottom_line, thumbnail_tier)
+    embed = build_search_embed(interaction.user, lane_display, rank_fields, bottom_line, thumbnail_tier)
     apply_footer(embed, interaction.guild)
 
     mention_prefix = f"{' '.join(role_mentions)} " if role_mentions else ""
@@ -835,17 +856,29 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
         await sent_message.edit(view=view)
         await update_group_embed(thread)  # título → "Grupo Abierto" + te añade a ti a la lista
 
-        if voice_channel:
-            voice_line = f" y en {voice_channel.mention} por voz"
-            voice_warning = ""
-        else:
-            voice_line = ""
-            voice_warning = "\n⚠️ No se pudo crear el canal de voz (revisa el permiso **Gestionar canales** del bot)."
-        await thread.send(
-            f"🔒 Este es tu hilo privado, {interaction.user.mention}. Habla aquí con quien se una "
-            f"al grupo{voice_line}. Se eliminará automáticamente pasadas {GROUP_LIFETIME_HOURS}h."
-            f"{voice_warning}"
+        welcome = discord.Embed(
+            title=f"🎮 {mode['label']} · hilo del grupo",
+            description=(
+                f"Hola {interaction.user.mention}, este es vuestro hilo privado: habla aquí con quien se una.\n\n"
+                f"👥 Plazas: **{mode['max_members']}** · "
+                f"⏳ Se eliminará solo pasadas **{GROUP_LIFETIME_HOURS} h**."
+            ),
+            color=COLOR_GROUP_OPEN
         )
+        if voice_channel:
+            welcome.add_field(
+                name="🔊 Sala de voz",
+                value=f"{voice_channel.mention}\nAbierta a todos los que tengan cuenta vinculada.",
+                inline=False
+            )
+        else:
+            welcome.add_field(
+                name="⚠️ Sin sala de voz",
+                value="No se pudo crear (revisa el permiso **Gestionar canales** del bot).",
+                inline=False
+            )
+        apply_footer(welcome, interaction.guild)
+        await thread.send(embed=welcome, allowed_mentions=discord.AllowedMentions.none())
         group_ready = True
     except discord.HTTPException as e:
         print(f"[GRUPO] No se pudo crear el hilo para {interaction.user} en {mode['label']}: "
@@ -1725,7 +1758,7 @@ async def close_group_silently(thread: discord.Thread, group: dict):
         except discord.HTTPException as e:
             print(f"[GRUPO] No se pudo bloquear el hilo {thread.id} al caducar: {e}")
 
-    await update_group_embed(thread)
+    await update_group_embed(thread, expired=True)
 
     channel = bot.get_channel(int(group["channel_id"]))
     if not channel:
