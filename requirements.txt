@@ -2,3 +2,4 @@ discord.py
 aiohttp
 flask
 python-dotenv
+Pillow>=10.1
