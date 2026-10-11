@@ -6,9 +6,12 @@ import random
 import threading
 import asyncio
 import time
+import collections
+import io
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from discord import app_commands
+from PIL import Image, ImageDraw, ImageFont
 from discord.ext import commands, tasks
 from discord.ui import View, Modal, TextInput, Select
 from flask import Flask
@@ -83,8 +86,19 @@ PENDING_MODE_SELECTION = {}
 
 http_session: aiohttp.ClientSession | None = None
 
+RIOT_CALL_TIMES = collections.deque()  # instantes de las últimas llamadas a Riot (ventana de 2 min)
+
+def riot_calls_last_2min() -> int:
+    """Cuántas llamadas a la API de Riot se han hecho en los últimos 2
+    minutos (la clave de desarrollo permite 100 por ventana de 2 min)."""
+    cutoff = time.time() - 120
+    while RIOT_CALL_TIMES and RIOT_CALL_TIMES[0] < cutoff:
+        RIOT_CALL_TIMES.popleft()
+    return len(RIOT_CALL_TIMES)
+
 async def riot_get(url):
     headers = {"X-Riot-Token": RIOT_API_KEY}
+    RIOT_CALL_TIMES.append(time.time())
     async with http_session.get(url, headers=headers) as r:
         if r.status != 200:
             print("Riot API error:", r.status, url)
@@ -157,6 +171,29 @@ async def apply_roles(member, region, solo, flex):
     if to_add:
         await member.add_roles(*to_add)
     return True
+
+async def announce_rank_up(member, old_solo, new_solo):
+    """Anuncia en el canal de charla una SUBIDA de rango en SoloQ. No avisa
+    si no había rango previo (UNRANKED o desconocido) ni si el cambio es una
+    bajada o un cambio de FlexQ. Nunca debe romper el flujo que lo llama."""
+    try:
+        if old_solo not in TIER_ORDER or new_solo not in TIER_ORDER or old_solo == "UNRANKED":
+            return
+        if TIER_ORDER.index(new_solo) <= TIER_ORDER.index(old_solo):
+            return
+        channel = member.guild.get_channel(RANKUP_CHANNEL_ID)
+        if not channel:
+            return
+        embed = discord.Embed(
+            description=f"🎉 {member.mention} ha subido a {format_tier_display(new_solo)} en SoloQ",
+            color=COLOR_GROUP_OPEN
+        )
+        thumb = tier_thumbnail_url(new_solo)
+        if thumb:
+            embed.set_thumbnail(url=thumb)
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as e:
+        print(f"[RANKUP] No se pudo anunciar la subida de {member}: {type(e).__name__}: {e}")
 
 async def clear_roles(member):
     """Se llama cuando el usuario se queda sin ninguna cuenta vinculada:
@@ -1226,10 +1263,12 @@ class Panel(View):
         solo, flex = await get_ranks(primary["puuid"], primary["region"])
 
         if solo != primary["solo"] or flex != primary["flex"]:
+            old_solo = primary["solo"]
             primary["solo"] = solo
             primary["flex"] = flex
             save_data(data)
             await apply_roles(interaction.user, primary["region"], solo, flex)
+            await announce_rank_up(interaction.user, old_solo, solo)
 
         embed = discord.Embed(
             title="✅ Datos actualizados",
@@ -1308,6 +1347,7 @@ async def update_ranks_loop():
             continue
 
         print(f"[RANKS] {uid}: {primary_acc['solo']}/{primary_acc['flex']} → {solo}/{flex}")
+        old_solo = primary_acc["solo"]
         primary_acc["solo"] = solo
         primary_acc["flex"] = flex
         changed = True
@@ -1316,6 +1356,7 @@ async def update_ranks_loop():
             member = guild.get_member(int(uid))
             if member:
                 await apply_roles(member, primary_acc["region"], solo, flex)
+                await announce_rank_up(member, old_solo, solo)
 
         await asyncio.sleep(0.5)
 
@@ -1511,6 +1552,438 @@ async def sincronizar_roles_error(interaction: discord.Interaction, error: app_c
         )
     else:
         raise error
+
+# ------------------ INFO DE JUGADOR (/info, menú contextual) ------------------
+
+PROFILE_CACHE_SECONDS = 600       # un perfil se reutiliza 10 min (cada consulta nueva cuesta ~8 llamadas)
+INFO_COOLDOWN_SECONDS = 15        # entre consultas de la misma persona
+INFO_API_BUDGET = 80              # si ya llevamos tantas llamadas en 2 min, pedimos esperar (límite real: 100)
+PROFILE_CACHE = {}                # puuid -> (timestamp, datos)
+INFO_COOLDOWNS = {}               # user_id -> timestamp de la última consulta
+DDRAGON = {"version": None, "champs": {}, "loaded_at": 0}
+
+QUEUE_NAMES = {
+    420: "SoloQ", 440: "FlexQ", 400: "Normal", 430: "Normal", 490: "Normal",
+    450: "ARAM", 1700: "Arena", 1710: "Arena", 900: "URF", 1900: "URF", 700: "Clash",
+}
+
+async def ensure_ddragon():
+    """Carga (y refresca cada 12 h) la versión actual de Data Dragon y el
+    mapa championId -> (nombre en español, id interno para el icono)."""
+    if DDRAGON["champs"] and time.time() - DDRAGON["loaded_at"] < 43200:
+        return
+    try:
+        async with http_session.get("https://ddragon.leagueoflegends.com/api/versions.json") as r:
+            version = (await r.json())[0]
+        async with http_session.get(
+            f"https://ddragon.leagueoflegends.com/cdn/{version}/data/es_ES/champion.json"
+        ) as r:
+            champs = (await r.json())["data"]
+        DDRAGON["version"] = version
+        DDRAGON["champs"] = {int(c["key"]): (c["name"], c["id"]) for c in champs.values()}
+        DDRAGON["loaded_at"] = time.time()
+    except Exception as e:
+        print(f"[INFO] No se pudo cargar Data Dragon: {type(e).__name__}: {e}")
+
+def champ_name(champion_id: int) -> str:
+    return DDRAGON["champs"].get(champion_id, (f"Campeón {champion_id}", None))[0]
+
+def champ_icon_url(champion_id: int):
+    entry = DDRAGON["champs"].get(champion_id)
+    if not entry or not DDRAGON["version"]:
+        return None
+    return f"https://ddragon.leagueoflegends.com/cdn/{DDRAGON['version']}/img/champion/{entry[1]}.png"
+
+async def fetch_profile(puuid: str, region: str):
+    """Datos del perfil de una cuenta (ligas, top 3 maestría, últimas 5
+    partidas), con caché. Cada campo que falle queda en None / lista vacía:
+    el embed se muestra igualmente con lo que haya."""
+    cached = PROFILE_CACHE.get(puuid)
+    if cached and time.time() - cached[0] < PROFILE_CACHE_SECONDS:
+        return cached[1]
+
+    platform, routing, _ = REGIONS[region]
+    await ensure_ddragon()
+
+    leagues_task = riot_get(f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}")
+    mastery_task = riot_get(
+        f"https://{platform}.api.riotgames.com/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}/top?count=3"
+    )
+    ids_task = riot_get(
+        f"https://{routing}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start=0&count=5"
+    )
+    leagues, mastery, match_ids = await asyncio.gather(leagues_task, mastery_task, ids_task)
+
+    matches = []
+    if match_ids:
+        details = await asyncio.gather(*[
+            riot_get(f"https://{routing}.api.riotgames.com/lol/match/v5/matches/{mid}") for mid in match_ids
+        ])
+        for d in details:
+            if not d:
+                continue
+            info = d.get("info", {})
+            me = next((p for p in info.get("participants", []) if p.get("puuid") == puuid), None)
+            if not me:
+                continue
+            duration = info.get("gameDuration", 0)
+            if duration > 100000:  # algunas partidas antiguas lo dan en ms
+                duration //= 1000
+            matches.append({
+                "champion": me.get("championName", "?"),
+                "champion_id": me.get("championId"),
+                "kills": me.get("kills", 0), "deaths": me.get("deaths", 0), "assists": me.get("assists", 0),
+                "win": bool(me.get("win")),
+                "remake": bool(me.get("gameEndedInEarlySurrender")) or duration < 300,
+                "queue": QUEUE_NAMES.get(info.get("queueId"), "Partida"),
+                "ended": (info.get("gameEndTimestamp") or 0) // 1000,
+            })
+
+    league_by_queue = {}
+    for q in (leagues or []):
+        league_by_queue[q.get("queueType")] = q
+
+    data = {"leagues": league_by_queue, "mastery": mastery or [], "matches": matches,
+            "league_ok": leagues is not None, "matches_ok": match_ids is not None, "image": None}
+
+    # Imagen con iconos de campeón (maestría + últimas partidas con filtro de color).
+    try:
+        top = (mastery or [])[:3]
+        icon_ids = [m["championId"] for m in top] + [m["champion_id"] for m in matches]
+        icons = await asyncio.gather(*[fetch_champ_icon(cid) for cid in icon_ids])
+        m_icons, g_icons = icons[:len(top)], icons[len(top):]
+        mastery_items = []
+        for m, raw in zip(top, m_icons):
+            pts = m.get("championPoints", 0)
+            pts_txt = f"{pts / 1000:.0f}k" if pts >= 10000 else str(pts)
+            mastery_items.append((raw, f"M{m.get('championLevel', 0)} · {pts_txt}"))
+        match_items = []
+        for g, raw in zip(matches, g_icons):
+            state = "remake" if g["remake"] else "win" if g["win"] else "loss"
+            match_items.append((raw, state, f"{g['kills']}/{g['deaths']}/{g['assists']}"))
+        if mastery_items or match_items:
+            data["image"] = await asyncio.to_thread(render_profile_image, mastery_items, match_items)
+    except Exception as e:
+        print(f"[INFO] No se pudo generar la imagen del perfil: {type(e).__name__}: {e}")
+    # Solo cacheamos si lo esencial salió bien (para no "congelar" un fallo de 429 durante 10 min).
+    if leagues is not None:
+        PROFILE_CACHE[puuid] = (time.time(), data)
+    return data
+
+# ------------------ IMAGEN DEL PERFIL (iconos con filtro) ------------------
+
+ICON_CACHE = {}  # (versión, championId) -> bytes del PNG
+
+def _load_font(size: int):
+    for path in ("DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+async def fetch_champ_icon(champion_id):
+    """Bytes del icono de un campeón (con caché en memoria), o None."""
+    url = champ_icon_url(champion_id) if champion_id else None
+    if not url:
+        return None
+    key = (DDRAGON["version"], champion_id)
+    if key in ICON_CACHE:
+        return ICON_CACHE[key]
+    try:
+        async with http_session.get(url) as r:
+            if r.status != 200:
+                return None
+            data = await r.read()
+        ICON_CACHE[key] = data
+        return data
+    except Exception as e:
+        print(f"[INFO] No se pudo descargar el icono {champion_id}: {type(e).__name__}: {e}")
+        return None
+
+def _rounded(img, radius):
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, img.size[0] - 1, img.size[1] - 1], radius=radius, fill=255)
+    out = img.copy()
+    out.putalpha(mask)
+    return out
+
+def _icon(raw, size, tint=None, border=None):
+    """Icono cuadrado con esquinas redondeadas; opcionalmente con un filtro
+    de color encima (tint = (r, g, b)) y un borde del mismo color."""
+    if raw:
+        img = Image.open(io.BytesIO(raw)).convert("RGBA").resize((size, size), Image.LANCZOS)
+    else:
+        img = Image.new("RGBA", (size, size), (60, 63, 68, 255))
+    if tint:
+        overlay = Image.new("RGBA", (size, size), tint + (110,))
+        img = Image.alpha_composite(img, overlay)
+    img = _rounded(img, max(8, size // 8))
+    if border:
+        ImageDraw.Draw(img).rounded_rectangle(
+            [0, 0, size - 1, size - 1], radius=max(8, size // 8), outline=border + (255,), width=4
+        )
+    return img
+
+def render_profile_image(mastery, matches):
+    """PNG con el top-3 de maestría (el 1.º más grande) y las últimas
+    partidas con filtro verde (victoria) / rojo (derrota) / gris (remake).
+    mastery: [(bytes, texto)], matches: [(bytes, estado, texto)]."""
+    W, MARGIN = 640, 24
+    GREEN, RED, GREY = (46, 204, 113), (231, 76, 60), (149, 165, 166)
+    font_big, font_small = _load_font(20), _load_font(17)
+    rows = []  # (alto, función de dibujo)
+
+    sizes = [150, 104, 104]
+    if mastery:
+        mh = sizes[0] + 30
+        rows.append(mh)
+    if matches:
+        rows.append(104 + 30)
+    gap = 18
+    H = MARGIN * 2 + sum(rows) + gap * (len(rows) - 1) if rows else 1
+    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    # Panel oscuro de fondo: así el texto se lee igual en tema claro y oscuro.
+    draw.rounded_rectangle([0, 0, W - 1, H - 1], radius=18, fill=(30, 31, 34, 255))
+    y = MARGIN
+
+    if mastery:
+        total_w = sum(sizes[:len(mastery)]) + 28 * (len(mastery) - 1)
+        x = (W - total_w) // 2
+        for (raw, text), size in zip(mastery, sizes):
+            canvas.alpha_composite(_icon(raw, size, border=(241, 196, 15) if size == sizes[0] else None),
+                                   (x, y + (sizes[0] - size)))
+            tw = draw.textlength(text, font=font_small)
+            draw.text((x + (size - tw) / 2, y + sizes[0] + 4), text, font=font_small, fill=(235, 235, 235, 255))
+            x += size + 28
+        y += rows[0] + gap
+
+    if matches:
+        size, space = 104, 14
+        total_w = size * len(matches) + space * (len(matches) - 1)
+        x = (W - total_w) // 2
+        for raw, state, text in matches:
+            color = GREEN if state == "win" else RED if state == "loss" else GREY
+            canvas.alpha_composite(_icon(raw, size, tint=color, border=color), (x, y))
+            tw = draw.textlength(text, font=font_small)
+            draw.text((x + (size - tw) / 2, y + size + 4), text, font=font_small, fill=(235, 235, 235, 255))
+            x += size + space
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
+
+def format_league_entry(entry):
+    """'<emoji> Oro II · 45 LP' + winrate, o 'Sin clasificar'."""
+    if not entry:
+        return "Sin clasificar"
+    tier = entry.get("tier", "UNRANKED")
+    tier_txt = format_tier_display(tier)
+    if tier in ("MASTER", "GRANDMASTER", "CHALLENGER"):
+        head = f"{tier_txt} · {entry.get('leaguePoints', 0)} LP"
+    else:
+        head = f"{tier_txt} {entry.get('rank', '')} · {entry.get('leaguePoints', 0)} LP"
+    wins, losses = entry.get("wins", 0), entry.get("losses", 0)
+    total = wins + losses
+    wr = f"{round(wins * 100 / total)}% WR · {wins}V {losses}D" if total else "Sin partidas"
+    return f"{head}\n{wr}"
+
+def build_profile_embed(member, account, profile, guild):
+    riot_id = account.get("riot_id") or "Cuenta sin nombre"
+    embed = discord.Embed(title=f"🎮 {riot_id}", color=COLOR_ACCOUNT_INFO)
+    embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+    embed.description = f"{member.mention} · Región **{account.get('region', '?')}**"
+
+    solo = profile["leagues"].get("RANKED_SOLO_5x5")
+    flex = profile["leagues"].get("RANKED_FLEX_SR")
+    embed.add_field(name="SoloQ", value=format_league_entry(solo), inline=True)
+    embed.add_field(name="FlexQ", value=format_league_entry(flex), inline=True)
+    if not profile["league_ok"]:
+        embed.add_field(name="⚠️ Rangos", value="No se pudieron obtener ahora mismo.", inline=False)
+
+    if profile["mastery"]:
+        lines = []
+        for i, m in enumerate(profile["mastery"][:3]):
+            medal = ["🥇", "🥈", "🥉"][i]
+            pts = m.get("championPoints", 0)
+            pts_txt = f"{pts / 1000:.0f}k" if pts >= 10000 else f"{pts:,}".replace(",", ".")
+            lines.append(f"{medal} **{champ_name(m['championId'])}** · M{m.get('championLevel', 0)} · {pts_txt} pts")
+        embed.add_field(name="🏆 Campeones con más maestría", value="\n".join(lines), inline=False)
+
+    if profile["matches"]:
+        lines = []
+        wins = losses = 0
+        for m in profile["matches"]:
+            if m["remake"]:
+                icon = "⚪"
+            elif m["win"]:
+                icon, wins = "🟢", wins + 1
+            else:
+                icon, losses = "🔴", losses + 1
+            when = f" · <t:{m['ended']}:R>" if m["ended"] else ""
+            lines.append(f"{icon} **{champ_name(m['champion_id']) if m['champion_id'] else m['champion']}** · "
+                         f"{m['queue']}{when}")
+        embed.add_field(name=f"🕹️ Últimas partidas ({wins}V {losses}D)", value="\n".join(lines), inline=False)
+    elif not profile["matches_ok"]:
+        embed.add_field(name="🕹️ Últimas partidas", value="No se pudieron obtener ahora mismo.", inline=False)
+
+    # Icono: el rango de SoloQ si lo hay; si no, el campeón con más maestría.
+    thumb = tier_thumbnail_url(solo["tier"]) if solo else None
+    if not thumb and profile["mastery"]:
+        thumb = champ_icon_url(profile["mastery"][0]["championId"])
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+    apply_footer(embed, guild)
+
+    file = None
+    if profile.get("image"):
+        file = discord.File(io.BytesIO(profile["image"]), filename="perfil.png")
+        embed.set_image(url="attachment://perfil.png")
+    return embed, file
+
+def build_roles_only_embed(member, derived, guild):
+    """Para quien tiene roles de rango (p.ej. vinculado por Orianna Bot) pero
+    no una cuenta nuestra: sin puuid no hay datos detallados."""
+    embed = discord.Embed(
+        title=f"🎮 {member.display_name}",
+        description=f"{member.mention}\n\nNo tiene la cuenta vinculada con este bot, así que solo "
+                    f"podemos mostrar sus rangos según sus roles.",
+        color=COLOR_ACCOUNT_INFO
+    )
+    embed.add_field(name="SoloQ", value=format_tier_display(derived["solo"]), inline=True)
+    embed.add_field(name="FlexQ", value=format_tier_display(derived["flex"]), inline=True)
+    thumb = tier_thumbnail_url(derived["solo"])
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+    apply_footer(embed, guild)
+    return embed
+
+class InfoAccountSelect(Select):
+    def __init__(self, member, accounts, selected_index, invoker_id):
+        options = [
+            discord.SelectOption(
+                label=a["riot_id"][:100], value=str(i),
+                description=f"{a['region']}" + (" · principal" if a.get("primary") else ""),
+                default=(i == selected_index)
+            ) for i, a in enumerate(accounts)
+        ]
+        super().__init__(placeholder="Cambiar de cuenta…", options=options, min_values=1, max_values=1)
+        self.member, self.accounts, self.invoker_id = member, accounts, invoker_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.invoker_id:
+            return await interaction.response.send_message(
+                "Solo quien lanzó este comando puede cambiar de cuenta. Usa `/info` para ver otro perfil.",
+                ephemeral=True
+            )
+        await interaction.response.defer()
+        idx = int(self.values[0])
+        acc = self.accounts[idx]
+        if riot_calls_last_2min() >= INFO_API_BUDGET and acc["puuid"] not in PROFILE_CACHE:
+            return await interaction.followup.send(
+                "⏳ Hay muchas consultas ahora mismo. Prueba de nuevo en un minuto.", ephemeral=True
+            )
+        profile = await fetch_profile(acc["puuid"], acc["region"])
+        embed, file = build_profile_embed(self.member, acc, profile, interaction.guild)
+        view = InfoView(self.member, self.accounts, idx, self.invoker_id)
+        await interaction.edit_original_response(
+            embed=embed, view=view, attachments=[file] if file else []
+        )
+
+class InfoView(View):
+    def __init__(self, member, accounts, selected_index, invoker_id):
+        super().__init__(timeout=300)
+        self.message = None
+        if len(accounts) > 1:
+            self.add_item(InfoAccountSelect(member, accounts, selected_index, invoker_id))
+
+    async def on_timeout(self):
+        # El desplegable deja de funcionar a los 5 min: lo quitamos para no dejar un control muerto.
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except discord.HTTPException:
+                pass
+
+async def run_info(interaction: discord.Interaction, target):
+    """Lógica común de /info y del menú contextual. Todas las comprobaciones
+    que pueden fallar se responden en privado ANTES de responder en público."""
+    guild = interaction.guild
+    if guild is None:
+        return await interaction.response.send_message("Este comando solo funciona en el servidor.", ephemeral=True)
+    if not isinstance(target, discord.Member):
+        target = guild.get_member(target.id)
+    if target is None or target.bot:
+        return await interaction.response.send_message(
+            "Elige a un miembro del servidor (no a un bot).", ephemeral=True
+        )
+
+    # Quien consulta debe tener su cuenta vinculada (igual que Buscar partida).
+    if not get_effective_primary(str(interaction.user.id), interaction.user):
+        return await interaction.response.send_message(
+            embed=unlinked_account_embed(guild), view=VincularPromptView(), ephemeral=True
+        )
+
+    now = time.time()
+    wait = INFO_COOLDOWN_SECONDS - (now - INFO_COOLDOWNS.get(interaction.user.id, 0))
+    if wait > 0:
+        return await interaction.response.send_message(
+            f"⏳ Espera {int(wait) + 1} s antes de consultar otro perfil.", ephemeral=True
+        )
+
+    data = load_data()
+    accounts = data.get(str(target.id)) or []
+    if not accounts:
+        derived = get_effective_primary(str(target.id), target)
+        if derived:
+            INFO_COOLDOWNS[interaction.user.id] = now
+            return await interaction.response.send_message(embed=build_roles_only_embed(target, derived, guild))
+        return await interaction.response.send_message(
+            f"**{target.display_name}** todavía no ha vinculado su cuenta de League of Legends.", ephemeral=True
+        )
+
+    # Principal primero en el desplegable por defecto.
+    primary_idx = next((i for i, a in enumerate(accounts) if a.get("primary")), 0)
+    account = accounts[primary_idx]
+
+    if account["puuid"] not in PROFILE_CACHE and riot_calls_last_2min() >= INFO_API_BUDGET:
+        return await interaction.response.send_message(
+            "⏳ Hay muchas consultas a Riot ahora mismo. Prueba de nuevo en un minuto.", ephemeral=True
+        )
+
+    INFO_COOLDOWNS[interaction.user.id] = now
+    await interaction.response.defer()  # público
+    try:
+        profile = await fetch_profile(account["puuid"], account["region"])
+        embed, file = build_profile_embed(target, account, profile, guild)
+    except Exception as e:
+        print(f"[INFO] Error construyendo el perfil de {target}: {type(e).__name__}: {e}")
+        INFO_COOLDOWNS.pop(interaction.user.id, None)
+        return await send_error(interaction, f"No se pudo cargar el perfil ({type(e).__name__}).")
+
+    view = InfoView(target, accounts, primary_idx, interaction.user.id)
+    kwargs = {"embed": embed}
+    if file:
+        kwargs["file"] = file
+    if len(accounts) > 1:
+        kwargs["view"] = view
+    message = await interaction.followup.send(**kwargs)
+    view.message = message
+
+@bot.tree.command(name="info", description="Perfil de LoL de un jugador: rangos, winrate, campeones y últimas partidas.")
+@app_commands.describe(usuario="El jugador del que quieres ver el perfil")
+@app_commands.guild_only()
+async def info_command(interaction: discord.Interaction, usuario: discord.Member):
+    await run_info(interaction, usuario)
+
+@bot.tree.context_menu(name="Ver perfil LoL")
+@app_commands.guild_only()
+async def info_context_menu(interaction: discord.Interaction, member: discord.Member):
+    await run_info(interaction, member)
 
 # ------------------ COMPOSICIÓN DEL SERVIDOR ------------------
 
