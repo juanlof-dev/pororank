@@ -253,3 +253,10 @@ GAME_MODES = {
         "show_lane": True,
     },
 }
+
+# 🎉 Canal donde se anuncian las subidas de rango en SoloQ ("Fulano ha subido a Platino").
+RANKUP_CHANNEL_ID = 1547248592962588772
+
+# Orden de menor a mayor, para saber si un cambio de tier es una subida.
+TIER_ORDER = ["UNRANKED", "IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM",
+              "EMERALD", "DIAMOND", "MASTER", "GRANDMASTER", "CHALLENGER"]
