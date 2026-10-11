@@ -1644,27 +1644,30 @@ async def fetch_profile(puuid: str, region: str):
         league_by_queue[q.get("queueType")] = q
 
     data = {"leagues": league_by_queue, "mastery": mastery or [], "matches": matches,
-            "league_ok": leagues is not None, "matches_ok": match_ids is not None, "image": None}
+            "league_ok": leagues is not None, "matches_ok": match_ids is not None, "assets": None}
 
-    # Imagen con iconos de campeón (maestría + últimas partidas con filtro de color).
+    # Imágenes necesarias para dibujar la tarjeta (iconos, banner, emblema). Se
+    # descargan una vez y se cachean; la tarjeta se dibuja al construir el embed.
     try:
         top = (mastery or [])[:3]
-        icon_ids = [m["championId"] for m in top] + [m["champion_id"] for m in matches]
-        icons = await asyncio.gather(*[fetch_champ_icon(cid) for cid in icon_ids])
-        m_icons, g_icons = icons[:len(top)], icons[len(top):]
-        mastery_items = []
-        for m, raw in zip(top, m_icons):
-            pts = m.get("championPoints", 0)
-            pts_txt = f"{pts / 1000:.0f}k" if pts >= 10000 else str(pts)
-            mastery_items.append((raw, f"M{m.get('championLevel', 0)} · {pts_txt}"))
-        match_items = []
-        for g, raw in zip(matches, g_icons):
-            state = "remake" if g["remake"] else "win" if g["win"] else "loss"
-            match_items.append((raw, state, f"{g['kills']}/{g['deaths']}/{g['assists']}"))
-        if mastery_items or match_items:
-            data["image"] = await asyncio.to_thread(render_profile_image, mastery_items, match_items)
+        champ_ids = [m["championId"] for m in top] + [g["champion_id"] for g in matches]
+        solo_entry = league_by_queue.get("RANKED_SOLO_5x5")
+        emblem_url = None
+        if solo_entry:
+            em = re.search(r":(\d+)>$", TIER_EMOJIS.get(solo_entry.get("tier"), ""))
+            emblem_url = f"https://cdn.discordapp.com/emojis/{em.group(1)}.png?size=256" if em else None
+        main_id = top[0]["championId"] if top else (matches[0]["champion_id"] if matches else None)
+        results = await asyncio.gather(
+            asyncio.gather(*[fetch_champ_icon(cid) for cid in champ_ids]),
+            fetch_asset(banner_url(main_id)),
+            fetch_asset(emblem_url),
+        )
+        icons, banner_bytes, emblem_bytes = results
+        data["assets"] = {"icons": list(icons), "banner": banner_bytes, "emblem": emblem_bytes,
+                          "n_mastery": len(top)}
     except Exception as e:
-        print(f"[INFO] No se pudo generar la imagen del perfil: {type(e).__name__}: {e}")
+        print(f"[INFO] No se pudieron descargar las imágenes del perfil: {type(e).__name__}: {e}")
+        data["assets"] = None
     # Solo cacheamos si lo esencial salió bien (para no "congelar" un fallo de 429 durante 10 min).
     if leagues is not None:
         PROFILE_CACHE[puuid] = (time.time(), data)
@@ -1728,53 +1731,180 @@ def _icon(raw, size, tint=None, border=None):
         )
     return img
 
-def render_profile_image(mastery, matches):
-    """PNG con el top-3 de maestría (el 1.º más grande) y las últimas
-    partidas con filtro verde (victoria) / rojo (derrota) / gris (remake).
-    mastery: [(bytes, texto)], matches: [(bytes, estado, texto)]."""
-    W, MARGIN = 640, 24
+TIER_COLORS = {
+    "UNRANKED": (160, 165, 175), "IRON": (130, 120, 115), "BRONZE": (176, 110, 70),
+    "SILVER": (190, 200, 215), "GOLD": (240, 200, 80), "PLATINUM": (80, 200, 190),
+    "EMERALD": (46, 204, 113), "DIAMOND": (110, 150, 255), "MASTER": (190, 100, 240),
+    "GRANDMASTER": (235, 90, 90), "CHALLENGER": (110, 215, 255),
+}
+
+ASSET_CACHE = {}  # url -> bytes (banners y emblemas de rango)
+
+async def fetch_asset(url):
+    """Descarga (con caché en memoria) una imagen por URL; None si falla."""
+    if not url:
+        return None
+    if url in ASSET_CACHE:
+        return ASSET_CACHE[url]
+    try:
+        async with http_session.get(url) as r:
+            if r.status != 200:
+                return None
+            data = await r.read()
+        ASSET_CACHE[url] = data
+        return data
+    except Exception as e:
+        print(f"[INFO] No se pudo descargar {url}: {type(e).__name__}: {e}")
+        return None
+
+def banner_url(champion_id):
+    entry = DDRAGON["champs"].get(champion_id) if champion_id else None
+    if not entry:
+        return None
+    return f"https://ddragon.leagueoflegends.com/cdn/img/champion/centered/{entry[1]}_0.jpg"
+
+def _fit_text(draw, text, font, max_width):
+    """Recorta con '…' si el texto no cabe en max_width."""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    while text and draw.textlength(text + "…", font=font) > max_width:
+        text = text[:-1]
+    return text + "…"
+
+def render_profile_card(card):
+    """Tarjeta de perfil completa en un PNG: banner del campeón principal,
+    emblema + Riot ID, bloques SoloQ/FlexQ con barra de winrate, top 3 de
+    maestría (el 1.º más grande) y últimas partidas con filtro verde/rojo.
+    `card` es un dict con todo lo necesario ya descargado (ver fetch_profile)."""
+    W, H = 860, 560
     GREEN, RED, GREY = (46, 204, 113), (231, 76, 60), (149, 165, 166)
-    font_big, font_small = _load_font(20), _load_font(17)
-    rows = []  # (alto, función de dibujo)
+    BG, PANEL, MUTED, TEXT = (30, 31, 34), (43, 45, 49), (160, 165, 175), (235, 235, 238)
+    f_title, f_big, f_mid = _load_font(32), _load_font(22), _load_font(18)
+    f_lbl, f_sm, f_xs = _load_font(15), _load_font(14), _load_font(12)
 
-    sizes = [150, 104, 104]
-    if mastery:
-        mh = sizes[0] + 30
-        rows.append(mh)
-    if matches:
-        rows.append(104 + 30)
-    gap = 18
-    H = MARGIN * 2 + sum(rows) + gap * (len(rows) - 1) if rows else 1
-    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-    # Panel oscuro de fondo: así el texto se lee igual en tema claro y oscuro.
-    draw.rounded_rectangle([0, 0, W - 1, H - 1], radius=18, fill=(30, 31, 34, 255))
-    y = MARGIN
+    im = Image.new("RGBA", (W, H), BG + (255,))
+    d = ImageDraw.Draw(im)
 
-    if mastery:
-        total_w = sum(sizes[:len(mastery)]) + 28 * (len(mastery) - 1)
-        x = (W - total_w) // 2
-        for (raw, text), size in zip(mastery, sizes):
-            canvas.alpha_composite(_icon(raw, size, border=(241, 196, 15) if size == sizes[0] else None),
-                                   (x, y + (sizes[0] - size)))
-            tw = draw.textlength(text, font=font_small)
-            draw.text((x + (size - tw) / 2, y + sizes[0] + 4), text, font=font_small, fill=(235, 235, 235, 255))
-            x += size + 28
-        y += rows[0] + gap
+    # ---- Banner ----
+    BANNER_H = 158
+    banner = None
+    if card.get("banner"):
+        try:
+            b = Image.open(io.BytesIO(card["banner"])).convert("RGBA")
+            scale = W / b.width
+            b = b.resize((W, max(BANNER_H, int(b.height * scale))), Image.LANCZOS)
+            top = max(0, (b.height - BANNER_H) // 3)
+            banner = b.crop((0, top, W, top + BANNER_H))
+        except Exception:
+            banner = None
+    if banner is None:
+        banner = Image.new("RGBA", (W, BANNER_H), (50, 52, 70, 255))
+    # Degradado: muy oscuro a la izquierda (donde va el texto) y más suave a la derecha.
+    shade = Image.new("RGBA", (W, BANNER_H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shade)
+    for x in range(W):
+        a = int(235 - 150 * (x / W))
+        sd.line([(x, 0), (x, BANNER_H)], fill=BG + (a,))
+    banner = Image.alpha_composite(banner, shade)
+    for y in range(BANNER_H - 28, BANNER_H):  # funde con el fondo por abajo
+        a = int(255 * (y - (BANNER_H - 28)) / 28)
+        ImageDraw.Draw(banner).line([(0, y), (W, y)], fill=BG + (a,))
+    im.alpha_composite(banner, (0, 0))
 
-    if matches:
-        size, space = 104, 14
-        total_w = size * len(matches) + space * (len(matches) - 1)
-        x = (W - total_w) // 2
-        for raw, state, text in matches:
-            color = GREEN if state == "win" else RED if state == "loss" else GREY
-            canvas.alpha_composite(_icon(raw, size, tint=color, border=color), (x, y))
-            tw = draw.textlength(text, font=font_small)
-            draw.text((x + (size - tw) / 2, y + size + 4), text, font=font_small, fill=(235, 235, 235, 255))
-            x += size + space
+    # ---- Emblema + nombre ----
+    solo = card.get("solo")
+    tier = (solo or {}).get("tier", "UNRANKED")
+    tcol = TIER_COLORS.get(tier, TIER_COLORS["UNRANKED"])
+    if card.get("emblem"):
+        try:
+            e = Image.open(io.BytesIO(card["emblem"])).convert("RGBA").resize((110, 110), Image.LANCZOS)
+            im.alpha_composite(e, (30, 28))
+        except Exception:
+            card["emblem"] = None
+    if not card.get("emblem"):
+        d.ellipse([34, 36, 134, 136], fill=PANEL + (255,), outline=tcol + (255,), width=4)
+        q = "?"
+        d.text((84 - d.textlength(q, font=f_title) / 2, 66), q, font=f_title, fill=tcol + (255,))
+    name = _fit_text(d, card.get("riot_id") or "Cuenta", f_title, W - 170 - 30)
+    d.text((156, 40), name, font=f_title, fill=(255, 255, 255, 255))
+    sub = f"{card.get('region', '?')}"
+    if card.get("lane"):
+        sub += f"  ·  {card['lane']}"
+    d.text((158, 88), sub, font=f_mid, fill=(205, 205, 215, 255))
+
+    # ---- Bloques SoloQ / FlexQ ----
+    def queue_block(x, title, entry):
+        d.rounded_rectangle([x, 168, x + 390, 285], radius=14, fill=PANEL + (255,))
+        d.text((x + 18, 180), title, font=f_lbl, fill=MUTED + (255,))
+        if not entry:
+            d.text((x + 18, 208), "Sin clasificar", font=f_big, fill=(190, 192, 200, 255))
+            return
+        t = entry.get("tier", "UNRANKED")
+        col = TIER_COLORS.get(t, TIER_COLORS["UNRANKED"])
+        label = TIER_DISPLAY_ES.get(t, t)
+        if t not in ("MASTER", "GRANDMASTER", "CHALLENGER"):
+            label += f" {entry.get('rank', '')}"
+        d.text((x + 18, 206), label, font=f_big, fill=col + (255,))
+        lp = f"{entry.get('leaguePoints', 0)} LP"
+        d.text((x + 372 - d.textlength(lp, font=f_mid), 208), lp, font=f_mid, fill=TEXT + (255,))
+        wins, losses = entry.get("wins", 0), entry.get("losses", 0)
+        total = wins + losses
+        d.rounded_rectangle([x + 18, 246, x + 372, 260], radius=7, fill=(70, 72, 78, 255))
+        if total:
+            wr = wins / total
+            d.rounded_rectangle([x + 18, 246, x + 18 + max(14, int(354 * wr)), 260], radius=7, fill=GREEN + (255,))
+            txt = f"{round(wr * 100)}% WR  ·  {wins}V {losses}D"
+        else:
+            txt = "Sin partidas"
+        d.text((x + 18, 265), txt, font=f_sm, fill=(200, 200, 210, 255))
+
+    queue_block(30, "SOLOQ", solo)
+    queue_block(440, "FLEXQ", card.get("flex"))
+
+    # ---- Maestría ----
+    d.text((30, 302), "CAMPEONES CON MÁS MAESTRÍA", font=f_lbl, fill=MUTED + (255,))
+    sizes = [120, 84, 84]
+    x = 30
+    for i, (raw, name_txt, lvl_txt) in enumerate(card.get("mastery", [])[:3]):
+        s = sizes[i]
+        y = 326 + (sizes[0] - s)
+        im.alpha_composite(_icon(raw, s, border=(241, 196, 15) if i == 0 else None), (x, y))
+        ty = 326 + sizes[0] + 6
+        d.text((x, ty), _fit_text(d, name_txt, f_sm, max(s, 100)), font=f_sm, fill=(255, 255, 255, 255))
+        d.text((x, ty + 18), lvl_txt, font=f_xs, fill=MUTED + (255,))
+        x += s + (22 if i == 0 else 18)
+    if not card.get("mastery"):
+        d.text((30, 340), "Sin datos de maestría", font=f_sm, fill=MUTED + (255,))
+
+    # ---- Últimas partidas ----
+    matches = card.get("matches", [])
+    d.text((400, 302), f"ÚLTIMAS {len(matches) or 5} PARTIDAS", font=f_lbl, fill=MUTED + (255,))
+    for i, m in enumerate(matches[:5]):
+        x = 400 + i * 90
+        col = GREEN if m["state"] == "win" else RED if m["state"] == "loss" else GREY
+        im.alpha_composite(_icon(m["raw"], 78, tint=col, border=col), (x, 326))
+        chip = m["queue"]
+        cw = d.textlength(chip, font=f_xs) + 14
+        cx = x + (78 - cw) / 2
+        d.rounded_rectangle([cx, 380, cx + cw, 398], radius=8, fill=BG + (235,))
+        d.text((cx + 7, 383), chip, font=f_xs, fill=(255, 255, 255, 255))
+        d.text((x + 2, 408), m["kda"], font=f_sm, fill=TEXT + (255,))
+        d.text((x + 2, 428), m["ago"], font=f_xs, fill=(150, 155, 165, 255))
+    if not matches:
+        d.text((400, 340), "Sin partidas recientes", font=f_sm, fill=MUTED + (255,))
+
+    # ---- Resumen ----
+    d.line([(30, 488), (W - 30, 488)], fill=(60, 62, 68, 255), width=2)
+    if card.get("summary"):
+        d.text((30, 504), _fit_text(d, card["summary"], f_sm, W - 60), font=f_sm, fill=(205, 205, 215, 255))
+
+    # Esquinas redondeadas de toda la tarjeta
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, W - 1, H - 1], radius=18, fill=255)
+    im.putalpha(mask)
 
     buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
+    im.save(buf, format="PNG")
     return buf.getvalue()
 
 def format_league_entry(entry):
@@ -1792,58 +1922,89 @@ def format_league_entry(entry):
     wr = f"{round(wins * 100 / total)}% WR · {wins}V {losses}D" if total else "Sin partidas"
     return f"{head}\n{wr}"
 
-def build_profile_embed(member, account, profile, guild):
+async def build_profile_embed(member, account, profile, guild):
+    """Embed mínimo + tarjeta de perfil dibujada (imagen adjunta). Devuelve
+    (embed, file). Si la imagen no se pudo generar, el embed lleva los datos
+    básicos en texto para no quedarse vacío."""
     riot_id = account.get("riot_id") or "Cuenta sin nombre"
-    embed = discord.Embed(title=f"🎮 {riot_id}", color=COLOR_ACCOUNT_INFO)
-    embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-    embed.description = f"{member.mention} · Región **{account.get('region', '?')}**"
-
     solo = profile["leagues"].get("RANKED_SOLO_5x5")
     flex = profile["leagues"].get("RANKED_FLEX_SR")
-    embed.add_field(name="SoloQ", value=format_league_entry(solo), inline=True)
-    embed.add_field(name="FlexQ", value=format_league_entry(flex), inline=True)
-    if not profile["league_ok"]:
-        embed.add_field(name="⚠️ Rangos", value="No se pudieron obtener ahora mismo.", inline=False)
+    tier = solo["tier"] if solo else "UNRANKED"
+    tcol = TIER_COLORS.get(tier, TIER_COLORS["UNRANKED"])
 
-    if profile["mastery"]:
-        lines = []
-        for i, m in enumerate(profile["mastery"][:3]):
-            medal = ["🥇", "🥈", "🥉"][i]
-            pts = m.get("championPoints", 0)
-            pts_txt = f"{pts / 1000:.0f}k" if pts >= 10000 else f"{pts:,}".replace(",", ".")
-            lines.append(f"{medal} **{champ_name(m['championId'])}** · M{m.get('championLevel', 0)} · {pts_txt} pts")
-        embed.add_field(name="🏆 Campeones con más maestría", value="\n".join(lines), inline=False)
-
-    if profile["matches"]:
-        lines = []
-        wins = losses = 0
-        for m in profile["matches"]:
-            if m["remake"]:
-                icon = "⚪"
-            elif m["win"]:
-                icon, wins = "🟢", wins + 1
-            else:
-                icon, losses = "🔴", losses + 1
-            when = f" · <t:{m['ended']}:R>" if m["ended"] else ""
-            lines.append(f"{icon} **{champ_name(m['champion_id']) if m['champion_id'] else m['champion']}** · "
-                         f"{m['queue']}{when}")
-        embed.add_field(name=f"🕹️ Últimas partidas ({wins}V {losses}D)", value="\n".join(lines), inline=False)
-    elif not profile["matches_ok"]:
-        embed.add_field(name="🕹️ Últimas partidas", value="No se pudieron obtener ahora mismo.", inline=False)
-
-    # Icono: el rango de SoloQ si lo hay; si no, el campeón con más maestría.
-    thumb = tier_thumbnail_url(solo["tier"]) if solo else None
-    if not thumb and profile["mastery"]:
-        thumb = champ_icon_url(profile["mastery"][0]["championId"])
-    if thumb:
-        embed.set_thumbnail(url=thumb)
+    embed = discord.Embed(title=f"🎮 {riot_id}", description=member.mention,
+                          color=discord.Color.from_rgb(*tcol))
+    embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
     apply_footer(embed, guild)
 
-    file = None
-    if profile.get("image"):
-        file = discord.File(io.BytesIO(profile["image"]), filename="perfil.png")
-        embed.set_image(url="attachment://perfil.png")
-    return embed, file
+    notes = []
+    if not profile["league_ok"]:
+        notes.append("⚠️ No se pudieron obtener los rangos ahora mismo.")
+    if not profile["matches_ok"]:
+        notes.append("⚠️ No se pudieron obtener las últimas partidas ahora mismo.")
+    if notes:
+        embed.description += "\n\n" + "\n".join(notes)
+
+    assets = profile.get("assets")
+    if not assets:
+        embed.add_field(name="SoloQ", value=format_league_entry(solo), inline=True)
+        embed.add_field(name="FlexQ", value=format_league_entry(flex), inline=True)
+        return embed, None
+
+    icons = assets["icons"]
+    n_m = assets["n_mastery"]
+    mastery = []
+    for m, raw in zip(profile["mastery"][:3], icons[:n_m]):
+        pts = m.get("championPoints", 0)
+        pts_txt = f"{pts / 1000:.0f}k" if pts >= 10000 else f"{pts:,}".replace(",", ".")
+        mastery.append((raw, champ_name(m["championId"]), f"M{m.get('championLevel', 0)} · {pts_txt} pts"))
+
+    now = datetime.now(timezone.utc)
+    matches, wins_streak, streak_open = [], 0, True
+    kda_ratios, played = [], {}
+    for g, raw in zip(profile["matches"], icons[n_m:]):
+        state = "remake" if g["remake"] else "win" if g["win"] else "loss"
+        ago = ""
+        if g["ended"]:
+            ago = humanize_delta(now - datetime.fromtimestamp(g["ended"], tz=timezone.utc))
+        matches.append({"raw": raw, "state": state, "queue": g["queue"],
+                        "kda": f"{g['kills']}/{g['deaths']}/{g['assists']}", "ago": ago})
+        if state != "remake":
+            if streak_open and state == "win":
+                wins_streak += 1
+            else:
+                streak_open = False
+            kda_ratios.append((g["kills"] + g["assists"]) / max(g["deaths"], 1))
+        name = champ_name(g["champion_id"]) if g["champion_id"] else g["champion"]
+        played[name] = played.get(name, 0) + 1
+
+    parts = []
+    if kda_ratios:
+        parts.append(f"KDA medio: {sum(kda_ratios) / len(kda_ratios):.1f}".replace(".", ","))
+    if played:
+        top_name, top_n = max(played.items(), key=lambda kv: kv[1])
+        if top_n > 1:
+            parts.append(f"Más jugado: {top_name} ({top_n} de {len(profile['matches'])})")
+    if wins_streak >= 2:
+        parts.append(f"Racha: {wins_streak} victorias")
+
+    lane_role = get_member_lane_role(member)
+    card = {
+        "riot_id": riot_id, "region": account.get("region", "?"),
+        "lane": lane_role.name if lane_role else None,
+        "solo": solo, "flex": flex, "emblem": assets["emblem"], "banner": assets["banner"],
+        "mastery": mastery, "matches": matches, "summary": "   ·   ".join(parts),
+    }
+    try:
+        png = await asyncio.to_thread(render_profile_card, card)
+    except Exception as e:
+        print(f"[INFO] No se pudo dibujar la tarjeta: {type(e).__name__}: {e}")
+        embed.add_field(name="SoloQ", value=format_league_entry(solo), inline=True)
+        embed.add_field(name="FlexQ", value=format_league_entry(flex), inline=True)
+        return embed, None
+
+    embed.set_image(url="attachment://perfil.png")
+    return embed, discord.File(io.BytesIO(png), filename="perfil.png")
 
 def build_roles_only_embed(member, derived, guild):
     """Para quien tiene roles de rango (p.ej. vinculado por Orianna Bot) pero
@@ -1888,7 +2049,7 @@ class InfoAccountSelect(Select):
                 "⏳ Hay muchas consultas ahora mismo. Prueba de nuevo en un minuto.", ephemeral=True
             )
         profile = await fetch_profile(acc["puuid"], acc["region"])
-        embed, file = build_profile_embed(self.member, acc, profile, interaction.guild)
+        embed, file = await build_profile_embed(self.member, acc, profile, interaction.guild)
         view = InfoView(self.member, self.accounts, idx, self.invoker_id)
         await interaction.edit_original_response(
             embed=embed, view=view, attachments=[file] if file else []
@@ -1959,7 +2120,7 @@ async def run_info(interaction: discord.Interaction, target):
     await interaction.response.defer()  # público
     try:
         profile = await fetch_profile(account["puuid"], account["region"])
-        embed, file = build_profile_embed(target, account, profile, guild)
+        embed, file = await build_profile_embed(target, account, profile, guild)
     except Exception as e:
         print(f"[INFO] Error construyendo el perfil de {target}: {type(e).__name__}: {e}")
         INFO_COOLDOWNS.pop(interaction.user.id, None)
