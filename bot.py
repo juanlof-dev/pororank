@@ -38,8 +38,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 COLOR_PANEL = 0x9B59B6        # 🟣 Morado — acciones principales / paneles
 COLOR_GROUP_OPEN = 0x2ECC71   # 🟢 Verde — búsqueda/grupo activo
 COLOR_GROUP_CLOSED = 0xE74C3C # 🔴 Rojo — cerrado/error
-COLOR_GROUP_FULL = 0xE67E22   # 🟠 Naranja — grupo completo
-COLOR_GROUP_EXPIRED = 0x95A5A6 # ⚪ Gris — grupo caducado
 COLOR_VERIFICATION = 0xF1C40F # 🟡 Dorado — verificación
 COLOR_ACCOUNT_INFO = 0x2C2F33 # ⚫ Oscuro — información de cuenta
 
@@ -311,31 +309,175 @@ def humanize_delta(delta):
         return "ayer"
     return f"hace {days} días"
 
-def build_search_embed(creator: discord.abc.User, lane_display, rank_fields, bottom_line, thumbnail_tier=None):
-    """Embed compacto: posición y rangos en columnas (campos inline) y la
-    línea de 'Buscando…' como descripción."""
-    embed = discord.Embed(title="🟢 Grupo Abierto", color=COLOR_GROUP_OPEN)
-    embed.set_author(name=creator.display_name, icon_url=creator.display_avatar.url)
-    embed.description = bottom_line
-    if lane_display:
-        embed.add_field(name="Posición", value=lane_display, inline=True)
-    for name, value in rank_fields:
-        embed.add_field(name=name, value=value, inline=True)
+# ------------------ TARJETA DEL AVISO DE BÚSQUEDA ------------------
 
-    if thumbnail_tier:
-        thumb = tier_thumbnail_url(thumbnail_tier)
-        if thumb:
-            embed.set_thumbnail(url=thumb)
-    embed.timestamp = discord.utils.utcnow()  # Discord lo traduce solo a "hace X min" y se conserva al clonar
-    return embed
+def mode_short_name(mode: dict) -> str:
+    """'DuoQ (SoloQ)' -> 'DuoQ'; el resto de modos se queda igual."""
+    return mode["label"].split(" (")[0]
 
-async def update_group_embed(thread: discord.Thread, expired: bool = False):
-    """Reconstruye el embed del grupo a partir del propio hilo (fuente de
-    verdad): quién está dentro (thread.fetch_members()) y si está cerrado
-    (thread.locked). No guardamos la lista de miembros en ningún sitio
-    aparte — siempre se lee de Discord. El tier de SoloQ de cada jugador se
-    deduce de sus roles actuales (igual que en get_effective_primary), así
-    que funciona también con gente vinculada por Orianna Bot."""
+def tier_emblem_url(tier_code):
+    raw = TIER_EMOJIS.get(tier_code, "")
+    m = re.search(r":(\d+)>$", raw)
+    return f"https://cdn.discordapp.com/emojis/{m.group(1)}.png?size=256" if m else None
+
+def render_group_card(card):
+    """Tarjeta del aviso: emblema(s) de rango, nombre, posición, rangos,
+    a quién busca y plazas. NO lleva el modo ni el estado (eso va en el
+    título del embed) ni la hora de cierre (va en texto, para que Discord
+    la mantenga al día). Plazas: verde si el grupo está abierto, rojo si
+    está cerrado."""
+    W, H = 800, 230
+    GREEN, RED = (46, 204, 113), (231, 76, 60)
+    BG, MUTED, TEXT = (30, 31, 34), (160, 165, 175), (235, 235, 238)
+    f_name, f_big, f_mid = _load_font(38), _load_font(24), _load_font(22)
+    f_lbl, f_chip = _load_font(13), _load_font(14)
+
+    im = Image.new("RGBA", (W, H), BG + (255,))
+    # Degradado neutro (sin color de estado: el verde/rojo se reserva a abierto/cerrado).
+    shade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shade)
+    for x in range(W):
+        sd.line([(x, 0), (x, H)], fill=(85, 90, 115, int(70 * (1 - x / W))))
+    im.alpha_composite(shade)
+    d = ImageDraw.Draw(im)
+
+    # Emblema principal (grande) y secundario (pequeño, superpuesto)
+    def paste_emblem(raw, size, pos, tier):
+        col = TIER_COLORS.get(tier, TIER_COLORS["UNRANKED"])
+        if raw:
+            try:
+                e = Image.open(io.BytesIO(raw)).convert("RGBA").resize((size, size), Image.LANCZOS)
+                im.alpha_composite(e, pos)
+                return
+            except Exception:
+                pass
+        d.ellipse([pos[0], pos[1], pos[0] + size, pos[1] + size], fill=(43, 45, 49, 255), outline=col + (255,), width=4)
+        q = "?"
+        d.text((pos[0] + size / 2 - d.textlength(q, font=f_big) / 2, pos[1] + size / 2 - 14), q, font=f_big, fill=col + (255,))
+
+    paste_emblem(card.get("emblem"), 140, (28, 38), card.get("emblem_tier", "UNRANKED"))
+    if card.get("emblem2_tier"):
+        paste_emblem(card.get("emblem2"), 66, (130, 142), card["emblem2_tier"])
+
+    name = _fit_text(d, card.get("name", "Jugador"), f_name, 250)
+    d.text((215, 30), name, font=f_name, fill=(255, 255, 255, 255))
+    x = 215
+    if card.get("lane"):
+        w = d.textlength(card["lane"].upper(), font=f_chip) + 24
+        d.rounded_rectangle([x, 84, x + w, 112], radius=14, fill=(60, 64, 72, 255))
+        d.text((x + 12, 89), card["lane"].upper(), font=f_chip, fill=(255, 255, 255, 255))
+
+    # Rangos
+    rx = 215
+    for label, tier in card.get("ranks", []):
+        col = TIER_COLORS.get(tier, TIER_COLORS["UNRANKED"])
+        d.text((rx, 128), label.upper(), font=f_lbl, fill=MUTED + (255,))
+        d.text((rx, 146), TIER_DISPLAY_ES.get(tier, tier), font=f_big, fill=col + (255,))
+        rx += 150
+
+    # Separador + a quién busca + plazas
+    d.line([(470, 36), (470, H - 36)], fill=(70, 72, 78, 255), width=2)
+    d.text((500, 34), "BUSCA", font=f_lbl, fill=MUTED + (255,))
+    d.text((500, 54), _fit_text(d, card.get("busca", ""), f_mid, W - 500 - 24), font=f_mid, fill=TEXT + (255,))
+    d.text((500, 112), "PLAZAS", font=f_lbl, fill=MUTED + (255,))
+    fill_col = RED if card.get("closed") else GREEN
+    total, count = card.get("max", 2), card.get("count", 1)
+    step = min(46, (W - 500 - 90) // max(total, 1))
+    for i in range(total):
+        cx = 500 + i * step
+        if i < count:
+            d.ellipse([cx, 138, cx + 34, 172], fill=fill_col + (255,))
+        else:
+            d.ellipse([cx, 138, cx + 34, 172], outline=(110, 114, 122, 255), width=4)
+    d.text((500 + total * step + 8, 142), f"{count}/{total}", font=f_mid, fill=TEXT + (255,))
+
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, W - 1, H - 1], radius=16, fill=255)
+    im.putalpha(mask)
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+async def build_group_message(guild, creator, mode_key, solo_tier, flex_tier, count, locked,
+                              created_at_iso, lines=None, voice_channel=None):
+    """Embed + tarjeta del aviso de búsqueda. Se usa tanto al publicarlo como
+    al actualizarlo (unirse/salir/cerrar), así que todo se calcula aquí a
+    partir de datos actuales. Devuelve (embed, file | None)."""
+    mode = GAME_MODES.get(mode_key, GAME_MODES["DUOQ"])
+    max_m = mode["max_members"]
+    state = "Cerrado" if locked else "Abierto"
+    title_icon = "🔴" if locked else "🟢"
+
+    embed = discord.Embed(
+        title=f"{title_icon} {mode_short_name(mode)} · Grupo {state} ({count}/{max_m})",
+        color=COLOR_GROUP_CLOSED if locked else COLOR_GROUP_OPEN
+    )
+    if creator:
+        embed.set_author(name=creator.display_name, icon_url=creator.display_avatar.url)
+    apply_footer(embed, guild)
+    try:
+        created = datetime.fromisoformat(created_at_iso)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        embed.timestamp = created
+    except (ValueError, TypeError):
+        created = None
+
+    paragraphs = []
+    if not locked and created:
+        end_ts = int((created + timedelta(hours=GROUP_LIFETIME_HOURS)).timestamp())
+        paragraphs.append(f"⏳ Se cierra <t:{end_ts}:R>")
+    if voice_channel:
+        paragraphs.append(f"🔊 {voice_channel.name} · *abierta a cuentas vinculadas*")
+    embed.description = "\n\n".join(paragraphs) if paragraphs else None
+    if lines:
+        embed.add_field(name="👥 JUGADORES", value="\n".join(lines), inline=False)
+
+    # ---- Datos de la tarjeta según el modo ----
+    lane_role = get_member_lane_role(creator) if (creator and mode["show_lane"]) else None
+    card = {"name": creator.display_name if creator else "Jugador", "lane": lane_role.name if lane_role else None,
+            "count": count, "max": max_m, "closed": locked, "ranks": []}
+    if mode_key == "DUOQ":
+        window = TIER_SEARCH_WINDOWS.get(solo_tier, [solo_tier])
+        card["busca"] = " / ".join(TIER_DISPLAY_ES.get(t, t) for t in reversed(window))
+        card.update(emblem_tier=solo_tier, emblem2_tier=flex_tier)
+        card["ranks"] = [("SoloQ", solo_tier), ("FlexQ", flex_tier)]
+    else:
+        card["busca"] = f"Jugadores para {mode_short_name(mode)}"
+        if mode["rank_source"] == "flex":
+            card.update(emblem_tier=flex_tier)
+            card["ranks"] = [("FlexQ", flex_tier)]
+        elif mode["rank_source"] == "solo_ref":
+            card.update(emblem_tier=solo_tier)
+            card["ranks"] = [("SoloQ (ref.)", solo_tier)]
+        else:
+            card["emblem_tier"] = "UNRANKED"
+
+    try:
+        card["emblem"], card["emblem2"] = await asyncio.gather(
+            fetch_asset(tier_emblem_url(card.get("emblem_tier"))),
+            fetch_asset(tier_emblem_url(card.get("emblem2_tier"))) if card.get("emblem2_tier") else asyncio.sleep(0),
+        )
+        png = await asyncio.to_thread(render_group_card, card)
+    except Exception as e:
+        print(f"[GRUPO] No se pudo dibujar la tarjeta del aviso: {type(e).__name__}: {e}")
+        # Sin imagen, el embed lleva los datos básicos en texto para no quedarse vacío.
+        if card.get("lane"):
+            embed.add_field(name="Posición", value=card["lane"], inline=True)
+        for label, tier in card["ranks"]:
+            embed.add_field(name=label, value=format_tier_display(tier), inline=True)
+        return embed, None
+
+    embed.set_image(url="attachment://busqueda.png")
+    return embed, discord.File(io.BytesIO(png), filename="busqueda.png")
+
+async def update_group_embed(thread: discord.Thread):
+    """Reconstruye el aviso del grupo (embed + tarjeta) a partir del propio
+    hilo (fuente de verdad): quién está dentro (thread.fetch_members()) y si
+    está cerrado (thread.locked). No guardamos la lista de miembros en
+    ningún sitio aparte — siempre se lee de Discord. Los rangos del creador
+    se deducen de sus roles actuales, así que funciona también con gente
+    vinculada por Orianna Bot."""
     group = get_group(thread.id)
     if not group:
         return
@@ -359,7 +501,8 @@ async def update_group_embed(thread: discord.Thread, expired: bool = False):
 
     guild = thread.guild
     creator_id = int(group["creator_id"])
-    mode = GAME_MODES.get(group["mode"], GAME_MODES["DUOQ"])
+    mode_key = group["mode"] if group["mode"] in GAME_MODES else "DUOQ"
+    mode = GAME_MODES[mode_key]
     lines = []
     for tm in thread_members:
         member = guild.get_member(tm.id)
@@ -375,60 +518,23 @@ async def update_group_embed(thread: discord.Thread, expired: bool = False):
         else:
             lines.append(f"{marker} {member.display_name} · SoloQ {solo_display}")
 
-    embed = discord.Embed.from_dict(message.embeds[0].to_dict()) if message.embeds else discord.Embed()
-    max_m = mode["max_members"]
-    count = len(lines)
-    contador = f"({count}/{max_m})"
-    if thread.locked and expired:
-        embed.title, embed.color = f"⌛ Grupo Caducado {contador}", COLOR_GROUP_EXPIRED
-    elif thread.locked and count >= max_m:
-        embed.title, embed.color = f"🔒 Grupo Completo {contador}", COLOR_GROUP_FULL
-    elif thread.locked:
-        embed.title, embed.color = f"🔴 Grupo Cerrado {contador}", COLOR_GROUP_CLOSED
-    else:
-        embed.title, embed.color = f"🟢 Grupo Abierto {contador}", COLOR_GROUP_OPEN
+    creator = guild.get_member(creator_id)
+    solo_tier = (get_member_tier_from_roles(creator, SOLO_ROLES) if creator else None) or "UNRANKED"
+    flex_tier = (get_member_tier_from_roles(creator, FLEX_ROLES) if creator else None) or "UNRANKED"
 
-    # Quitamos cualquier campo "JUGADORES" de una actualización anterior
-    # para no duplicarlo. "🔊 Sala de voz" ya no se usa como campo (ahora
-    # va en la descripción), pero lo seguimos filtrando aquí para limpiar
-    # los mensajes de grupos creados con la versión anterior.
-    kept_fields = [f for f in embed.fields if f.name not in ("👥 JUGADORES", "🔊 Sala de voz")]
-    embed.clear_fields()
-    for f in kept_fields:
-        embed.add_field(name=f.name, value=f.value, inline=f.inline)
+    voice_channel = None
+    if group.get("voice_channel_id"):
+        voice_channel = guild.get_channel(int(group["voice_channel_id"]))
 
-    # La sala de voz va como último párrafo de la descripción: es un único
-    # dato, y así queda cohesionada con el resto del bloque de info (lane,
-    # rango, "Buscando jugadores…"). Quitamos cualquier párrafo de sala de
-    # voz previo y lo volvemos a añadir solo si la sala sigue existiendo.
-    paragraphs = [p for p in (embed.description or "").split("\n\n")
-                  if p and not p.startswith(("🔊 ", "🎟️ ", "⏳ "))]
-    # Plazas visuales: ● ocupadas, ○ libres.
-    if not thread.locked:
-        free = max(max_m - count, 0)
-        plazas = "●" * min(count, max_m) + "○" * free
-        extra = " · **¡Falta 1!**" if free == 1 else ""
-        paragraphs.append(f"🎟️ `{' '.join(plazas)}` {count}/{max_m}{extra}")
-        try:
-            created = datetime.fromisoformat(group["created_at"])
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            end_ts = int((created + timedelta(hours=GROUP_LIFETIME_HOURS)).timestamp())
-            paragraphs.append(f"⏳ Se cierra <t:{end_ts}:R>")
-        except (ValueError, TypeError, KeyError):
-            pass
-    voice_channel_id = group.get("voice_channel_id")
-    if voice_channel_id:
-        voice_channel = guild.get_channel(int(voice_channel_id))
-        if voice_channel:
-            paragraphs.append(f"🔊 {voice_channel.name} · *abierta a cuentas vinculadas*")
-    embed.description = "\n\n".join(paragraphs)
-
-    if lines:
-        embed.add_field(name="👥 JUGADORES", value="\n".join(lines), inline=False)
-
+    embed, file = await build_group_message(
+        guild, creator, mode_key, solo_tier, flex_tier, len(lines), thread.locked,
+        group["created_at"], lines=lines, voice_channel=voice_channel
+    )
     try:
-        await message.edit(embed=embed)
+        if file:
+            await message.edit(embed=embed, attachments=[file])
+        else:
+            await message.edit(embed=embed, attachments=[])
     except discord.HTTPException:
         pass
 
@@ -580,7 +686,7 @@ class GroupView(View):
                             title="🔒 Grupo completo",
                             description="¡Equipo al completo! El grupo se ha cerrado automáticamente "
                                         "y ya no admite más jugadores. ¡A jugar!",
-                            color=COLOR_GROUP_FULL
+                            color=COLOR_GROUP_CLOSED
                         ), thread.guild)
                         await thread.send(embed=full_embed, allowed_mentions=discord.AllowedMentions.none())
                     except discord.HTTPException:
@@ -763,8 +869,6 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
 
     # ---------- Canal, menciones, texto de rango y miniatura según el modo ----------
     role_mentions = []
-    rank_fields = []
-    thumbnail_tier = None
 
     if mode_key == "DUOQ":
         channel_id = TIER_CHANNELS.get(solo_tier)
@@ -780,12 +884,6 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
             if tier_role:
                 role_mentions.append(tier_role.mention)
 
-        # Texto "Platino / Oro": el propio tier primero, luego el/los vecinos
-        # más bajos (window_tiers está guardado de menor a mayor en config.py).
-        window_text = " / ".join(TIER_DISPLAY_ES.get(t, t) for t in reversed(window_tiers))
-        rank_fields = [("SoloQ", format_tier_display(solo_tier)), ("FlexQ", format_tier_display(flex_tier))]
-        bottom_line = f"👥 Buscando jugadores de {window_text}"
-        thumbnail_tier = solo_tier
     else:
         channel_id = mode.get("channel_id")
         channel = interaction.guild.get_channel(channel_id) if channel_id else None
@@ -794,25 +892,17 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
                 interaction, f"El canal de **{mode['label']}** todavía no está configurado."
             )
 
-        if mode["rank_source"] == "flex":
-            rank_fields = [("FlexQ", format_tier_display(flex_tier))]
-            thumbnail_tier = flex_tier
-        elif mode["rank_source"] == "solo_ref":
-            rank_fields = [("SoloQ (ref.)", format_tier_display(solo_tier))]
-            thumbnail_tier = solo_tier
-        # rank_source None: no se muestra ningún rango
-
-        bottom_line = f"👥 Buscando jugadores para {mode['label']}"
-
-    lane_display = get_lane_display(lane_role) if lane_role else None
-    embed = build_search_embed(interaction.user, lane_display, rank_fields, bottom_line, thumbnail_tier)
-    apply_footer(embed, interaction.guild)
+    embed, card_file = await build_group_message(
+        interaction.guild, interaction.user, mode_key, solo_tier, flex_tier, 1, False,
+        discord.utils.utcnow().isoformat()
+    )
 
     mention_prefix = f"{' '.join(role_mentions)} " if role_mentions else ""
     try:
         sent_message = await channel.send(
             content=f"{mention_prefix}{interaction.user.mention} está buscando partida",
             embed=embed,
+            **({"file": card_file} if card_file else {}),
             allowed_mentions=discord.AllowedMentions(roles=True, users=True)
         )
     except discord.Forbidden:
@@ -2392,7 +2482,7 @@ async def close_group_silently(thread: discord.Thread, group: dict):
         except discord.HTTPException as e:
             print(f"[GRUPO] No se pudo bloquear el hilo {thread.id} al caducar: {e}")
 
-    await update_group_embed(thread, expired=True)
+    await update_group_embed(thread)
 
     channel = bot.get_channel(int(group["channel_id"]))
     if not channel:
