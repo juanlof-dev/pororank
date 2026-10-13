@@ -320,28 +320,49 @@ def tier_emblem_url(tier_code):
     m = re.search(r":(\d+)>$", raw)
     return f"https://cdn.discordapp.com/emojis/{m.group(1)}.png?size=256" if m else None
 
+def _fit_font(draw, text, base_size, max_width, min_size=18):
+    """Fuente más pequeña (hasta min_size) si el texto no cabe en max_width."""
+    size = base_size
+    font = _load_font(size)
+    while size > min_size and draw.textlength(text, font=font) > max_width:
+        size -= 2
+        font = _load_font(size)
+    return font
+
 def render_group_card(card):
-    """Tarjeta del aviso: emblema(s) de rango, nombre, posición, rangos,
-    a quién busca y plazas. NO lleva el modo ni el estado (eso va en el
-    título del embed) ni la hora de cierre (va en texto, para que Discord
-    la mantenga al día). Plazas: verde si el grupo está abierto, rojo si
-    está cerrado."""
-    W, H = 800, 230
+    """Tarjeta del aviso: emblema(s) de rango, nombre, posición (con icono),
+    rangos, a quién busca y plazas con el avatar de cada jugador. NO lleva
+    el modo ni el estado (van en el título del embed) ni la hora de cierre
+    (va en texto, para que Discord la mantenga al día). Aros de las plazas:
+    verde si el grupo está abierto, rojo si está cerrado."""
+    W, H = 800, 250
     GREEN, RED = (46, 204, 113), (231, 76, 60)
-    BG, MUTED, TEXT = (30, 31, 34), (160, 165, 175), (235, 235, 238)
-    f_name, f_big, f_mid = _load_font(38), _load_font(24), _load_font(22)
-    f_lbl, f_chip = _load_font(13), _load_font(14)
+    BG, MUTED, TEXT = (30, 31, 34), (170, 175, 185), (240, 240, 243)
+    f_name, f_rank, f_rank_big = _load_font(44), _load_font(30), _load_font(36)
+    f_busca, f_count, f_chip, f_lbl = _load_font(28), _load_font(22), _load_font(20), _load_font(16)
+    f_wm = _load_font(150)
 
     im = Image.new("RGBA", (W, H), BG + (255,))
-    # Degradado neutro (sin color de estado: el verde/rojo se reserva a abierto/cerrado).
     shade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     sd = ImageDraw.Draw(shade)
     for x in range(W):
         sd.line([(x, 0), (x, H)], fill=(85, 90, 115, int(70 * (1 - x / W))))
     im.alpha_composite(shade)
+
+    # Marca de agua con el nombre del modo (gris muy tenue, sin colores de estado)
+    wm_text = card.get("mode_name", "").upper()
+    if wm_text:
+        wm = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        wd = ImageDraw.Draw(wm)
+        size = 150
+        font = f_wm
+        while wd.textlength(wm_text, font=font) > W - 40 and size > 60:
+            size -= 10
+            font = _load_font(size)
+        wd.text((W - wd.textlength(wm_text, font=font) - 12, H - size - 38), wm_text, font=font, fill=(255, 255, 255, 9))
+        im.alpha_composite(wm)
     d = ImageDraw.Draw(im)
 
-    # Emblema principal (grande) y secundario (pequeño, superpuesto)
     def paste_emblem(raw, size, pos, tier):
         col = TIER_COLORS.get(tier, TIER_COLORS["UNRANKED"])
         if raw:
@@ -352,54 +373,99 @@ def render_group_card(card):
             except Exception:
                 pass
         d.ellipse([pos[0], pos[1], pos[0] + size, pos[1] + size], fill=(43, 45, 49, 255), outline=col + (255,), width=4)
-        q = "?"
-        d.text((pos[0] + size / 2 - d.textlength(q, font=f_big) / 2, pos[1] + size / 2 - 14), q, font=f_big, fill=col + (255,))
+        d.text((pos[0] + size / 2 - d.textlength("?", font=f_rank) / 2, pos[1] + size / 2 - 20), "?", font=f_rank, fill=col + (255,))
 
-    paste_emblem(card.get("emblem"), 140, (28, 38), card.get("emblem_tier", "UNRANKED"))
+    paste_emblem(card.get("emblem"), 140, (26, 40), card.get("emblem_tier", "UNRANKED"))
     if card.get("emblem2_tier"):
-        paste_emblem(card.get("emblem2"), 66, (130, 142), card["emblem2_tier"])
+        paste_emblem(card.get("emblem2"), 74, (122, 140), card["emblem2_tier"])
 
-    name = _fit_text(d, card.get("name", "Jugador"), f_name, 250)
-    d.text((215, 30), name, font=f_name, fill=(255, 255, 255, 255))
-    x = 215
-    if card.get("lane"):
-        w = d.textlength(card["lane"].upper(), font=f_chip) + 24
-        d.rounded_rectangle([x, 84, x + w, 112], radius=14, fill=(60, 64, 72, 255))
-        d.text((x + 12, 89), card["lane"].upper(), font=f_chip, fill=(255, 255, 255, 255))
+    name_txt = card.get("name", "Jugador")
+    f_name = _fit_font(d, name_txt, 44, 235, 26)
+    d.text((220, 28), _fit_text(d, name_txt, f_name, 235), font=f_name, fill=(255, 255, 255, 255))
 
-    # Rangos
-    rx = 215
-    for label, tier in card.get("ranks", []):
+    # Posición (chip con icono)
+    has_lane = bool(card.get("lane"))
+    if has_lane:
+        label = card["lane"].upper()
+        icon = None
+        if card.get("lane_icon"):
+            try:
+                icon = Image.open(io.BytesIO(card["lane_icon"])).convert("RGBA").resize((28, 28), Image.LANCZOS)
+            except Exception:
+                icon = None
+        w = d.textlength(label, font=f_chip) + 28 + (36 if icon else 0)
+        d.rounded_rectangle([220, 92, 220 + w, 130], radius=19, fill=(60, 64, 72, 255))
+        tx = 220 + 14
+        if icon:
+            im.alpha_composite(icon, (tx, 97))
+            tx += 36
+        d.text((tx, 99), label, font=f_chip, fill=(255, 255, 255, 255))
+
+    # Rangos: si no hay posición suben y se hacen más grandes (ARAM, Arena)
+    ranks = card.get("ranks", [])
+    ly, vy, base = (146, 166, 30) if has_lane else (104, 126, 36)
+    texts = [TIER_DISPLAY_ES.get(t, t) for _, t in ranks]
+    # Un único tamaño para todos los rangos, el mayor al que quepan en 240 px.
+    rsize = base
+    while rsize > 18:
+        f = _load_font(rsize)
+        if sum(d.textlength(t, font=f) for t in texts) + 28 * max(len(texts) - 1, 0) <= 240:
+            break
+        rsize -= 2
+    fv = _load_font(rsize)
+    rx = 220
+    for (label, tier), tier_txt in zip(ranks, texts):
         col = TIER_COLORS.get(tier, TIER_COLORS["UNRANKED"])
-        d.text((rx, 128), label.upper(), font=f_lbl, fill=MUTED + (255,))
-        d.text((rx, 146), TIER_DISPLAY_ES.get(tier, tier), font=f_big, fill=col + (255,))
-        rx += 150
+        d.text((rx, ly), label.upper(), font=f_lbl, fill=MUTED + (255,))
+        d.text((rx, vy + (base - rsize) // 2), tier_txt, font=fv, fill=col + (255,))
+        rx += max(d.textlength(tier_txt, font=fv), d.textlength(label.upper(), font=f_lbl)) + 28
 
-    # Separador + a quién busca + plazas
-    d.line([(470, 36), (470, H - 36)], fill=(70, 72, 78, 255), width=2)
-    d.text((500, 34), "BUSCA", font=f_lbl, fill=MUTED + (255,))
-    d.text((500, 54), _fit_text(d, card.get("busca", ""), f_mid, W - 500 - 24), font=f_mid, fill=TEXT + (255,))
-    d.text((500, 112), "PLAZAS", font=f_lbl, fill=MUTED + (255,))
-    fill_col = RED if card.get("closed") else GREEN
-    total, count = card.get("max", 2), card.get("count", 1)
-    step = min(46, (W - 500 - 90) // max(total, 1))
+    # Separador, a quién busca y plazas con avatares
+    d.line([(470, 34), (470, H - 34)], fill=(70, 72, 78, 255), width=2)
+    d.text((500, 32), "BUSCA", font=f_lbl, fill=MUTED + (255,))
+    busca_txt = card.get("busca", "")
+    f_busca = _fit_font(d, busca_txt, 28, W - 500 - 20, 20)
+    d.text((500, 54), _fit_text(d, busca_txt, f_busca, W - 500 - 20), font=f_busca, fill=TEXT + (255,))
+
+    ring = RED if card.get("closed") else GREEN
+    total = card.get("max", 2)
+    joined = card.get("joined", [])
+    step = min(58, (W - 500 - 20) // max(total, 1))
+    size = min(52, step - 6)
     for i in range(total):
         cx = 500 + i * step
-        if i < count:
-            d.ellipse([cx, 138, cx + 34, 172], fill=fill_col + (255,))
+        box = [cx, 124, cx + size, 124 + size]
+        if i < len(joined):
+            raw, initial = joined[i]
+            avatar = None
+            if raw:
+                try:
+                    avatar = Image.open(io.BytesIO(raw)).convert("RGBA").resize((size, size), Image.LANCZOS)
+                except Exception:
+                    avatar = None
+            if avatar is None:
+                avatar = Image.new("RGBA", (size, size), (88, 91, 99, 255))
+                ImageDraw.Draw(avatar).text((size / 2 - 8, size / 2 - 14), initial, font=f_chip, fill=(255, 255, 255, 255))
+            circle = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(circle).ellipse([0, 0, size - 1, size - 1], fill=255)
+            avatar.putalpha(circle)
+            im.alpha_composite(avatar, (cx, 124))
+            d.ellipse(box, outline=ring + (255,), width=4)
         else:
-            d.ellipse([cx, 138, cx + 34, 172], outline=(110, 114, 122, 255), width=4)
-    d.text((500 + total * step + 8, 142), f"{count}/{total}", font=f_mid, fill=TEXT + (255,))
+            d.ellipse(box, outline=(110, 114, 122, 255), width=3)
+            d.text((cx + size / 2 - d.textlength("+", font=f_rank) / 2, 124 + size / 2 - 19), "+", font=f_rank, fill=(110, 114, 122, 255))
+    d.text((500, 192), f"{min(len(joined), total) if joined else card.get('count', 0)}/{total} jugadores",
+           font=f_count, fill=TEXT + (255,))
 
     mask = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, W - 1, H - 1], radius=16, fill=255)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, W - 1, H - 1], radius=18, fill=255)
     im.putalpha(mask)
     buf = io.BytesIO()
     im.save(buf, format="PNG")
     return buf.getvalue()
 
 async def build_group_message(guild, creator, mode_key, solo_tier, flex_tier, count, locked,
-                              created_at_iso, lines=None, voice_channel=None):
+                              created_at_iso, lines=None, voice_channel=None, members=None):
     """Embed + tarjeta del aviso de búsqueda. Se usa tanto al publicarlo como
     al actualizarlo (unirse/salir/cerrar), así que todo se calcula aquí a
     partir de datos actuales. Devuelve (embed, file | None)."""
@@ -436,7 +502,15 @@ async def build_group_message(guild, creator, mode_key, solo_tier, flex_tier, co
     # ---- Datos de la tarjeta según el modo ----
     lane_role = get_member_lane_role(creator) if (creator and mode["show_lane"]) else None
     card = {"name": creator.display_name if creator else "Jugador", "lane": lane_role.name if lane_role else None,
-            "count": count, "max": max_m, "closed": locked, "ranks": []}
+            "count": count, "max": max_m, "closed": locked, "ranks": [], "mode_name": mode_short_name(mode)}
+    lane_icon_url = None
+    if lane_role:
+        lane_key = next((k for k, v in LANE_ROLES.items() if v == lane_role.id), None)
+        em = re.search(r":(\d+)>$", LANE_EMOJIS.get(lane_key, "")) if lane_key else None
+        lane_icon_url = f"https://cdn.discordapp.com/emojis/{em.group(1)}.png?size=64" if em else None
+    # Jugadores dentro (el creador primero) para las plazas con avatar.
+    people = list(members) if members else ([creator] if creator else [])
+    people = [m for m in people if m is not None][:max_m]
     if mode_key == "DUOQ":
         window = TIER_SEARCH_WINDOWS.get(solo_tier, [solo_tier])
         card["busca"] = " / ".join(TIER_DISPLAY_ES.get(t, t) for t in reversed(window))
@@ -454,10 +528,14 @@ async def build_group_message(guild, creator, mode_key, solo_tier, flex_tier, co
             card["emblem_tier"] = "UNRANKED"
 
     try:
-        card["emblem"], card["emblem2"] = await asyncio.gather(
+        results = await asyncio.gather(
             fetch_asset(tier_emblem_url(card.get("emblem_tier"))),
             fetch_asset(tier_emblem_url(card.get("emblem2_tier"))) if card.get("emblem2_tier") else asyncio.sleep(0),
+            fetch_asset(lane_icon_url),
+            *[fetch_asset(str(p.display_avatar.replace(size=128, format="png").url)) for p in people],
         )
+        card["emblem"], card["emblem2"], card["lane_icon"] = results[0], results[1], results[2]
+        card["joined"] = [(raw, (p.display_name[:1] or "?").upper()) for p, raw in zip(people, results[3:])]
         png = await asyncio.to_thread(render_group_card, card)
     except Exception as e:
         print(f"[GRUPO] No se pudo dibujar la tarjeta del aviso: {type(e).__name__}: {e}")
@@ -504,10 +582,12 @@ async def update_group_embed(thread: discord.Thread):
     mode_key = group["mode"] if group["mode"] in GAME_MODES else "DUOQ"
     mode = GAME_MODES[mode_key]
     lines = []
+    present = []
     for tm in thread_members:
         member = guild.get_member(tm.id)
         if not member or member.bot:
             continue
+        present.append(member)
         solo_tier = get_member_tier_from_roles(member, SOLO_ROLES) or "UNRANKED"
         solo_display = format_tier_display(solo_tier)
         marker = "🔸" if member.id == creator_id else "🔹"
@@ -528,7 +608,8 @@ async def update_group_embed(thread: discord.Thread):
 
     embed, file = await build_group_message(
         guild, creator, mode_key, solo_tier, flex_tier, len(lines), thread.locked,
-        group["created_at"], lines=lines, voice_channel=voice_channel
+        group["created_at"], lines=lines, voice_channel=voice_channel,
+        members=sorted(present, key=lambda m: m.id != creator_id)  # el creador primero
     )
     try:
         if file:
@@ -1841,6 +1922,8 @@ async def fetch_asset(url):
             if r.status != 200:
                 return None
             data = await r.read()
+        if len(ASSET_CACHE) > 400:  # tope para no crecer sin límite (avatares, banners…)
+            ASSET_CACHE.clear()
         ASSET_CACHE[url] = data
         return data
     except Exception as e:
