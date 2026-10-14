@@ -11,7 +11,8 @@ import io
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from discord import app_commands
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+import math
 from discord.ext import commands, tasks
 from discord.ui import View, Modal, TextInput, Select
 from flask import Flask
@@ -329,6 +330,15 @@ def _fit_font(draw, text, base_size, max_width, min_size=18):
         font = _load_font(size)
     return font
 
+def _dim(img):
+    """Apaga una imagen RGBA (menos color y brillo) conservando la transparencia."""
+    alpha = img.getchannel("A")
+    rgb = ImageEnhance.Color(img.convert("RGB")).enhance(0.35)
+    rgb = ImageEnhance.Brightness(rgb).enhance(0.8)
+    out = rgb.convert("RGBA")
+    out.putalpha(alpha)
+    return out
+
 def render_group_card(card):
     """Tarjeta del aviso: emblema(s) de rango, nombre, posición (con icono),
     rangos, a quién busca y plazas con el avatar de cada jugador. NO lleva
@@ -427,7 +437,11 @@ def render_group_card(card):
     f_busca = _fit_font(d, busca_txt, 28, W - 500 - 20, 20)
     d.text((500, 54), _fit_text(d, busca_txt, f_busca, W - 500 - 20), font=f_busca, fill=TEXT + (255,))
 
-    ring = RED if card.get("closed") else GREEN
+    closed = bool(card.get("closed"))
+    if closed:  # grupo cerrado: todo lo anterior se ve apagado (sin añadir colores nuevos)
+        im = _dim(im)
+        d = ImageDraw.Draw(im)
+    ring = RED if closed else GREEN
     total = card.get("max", 2)
     joined = card.get("joined", [])
     step = min(58, (W - 500 - 20) // max(total, 1))
@@ -446,16 +460,31 @@ def render_group_card(card):
             if avatar is None:
                 avatar = Image.new("RGBA", (size, size), (88, 91, 99, 255))
                 ImageDraw.Draw(avatar).text((size / 2 - 8, size / 2 - 14), initial, font=f_chip, fill=(255, 255, 255, 255))
+            if closed:
+                avatar = _dim(avatar)
             circle = Image.new("L", (size, size), 0)
             ImageDraw.Draw(circle).ellipse([0, 0, size - 1, size - 1], fill=255)
             avatar.putalpha(circle)
             im.alpha_composite(avatar, (cx, 124))
             d.ellipse(box, outline=ring + (255,), width=4)
+            if i == 0:  # el creador (siempre la primera plaza) lleva una estrella dorada
+                bx, by, br = cx + size - 6, 124 - 2, 13
+                d.ellipse([bx - br, by - br, bx + br, by + br], fill=(30, 31, 34, 255), outline=(241, 196, 15, 255), width=2)
+                pts = []
+                for k in range(10):
+                    ang = -math.pi / 2 + k * math.pi / 5
+                    rad = 9 if k % 2 == 0 else 4
+                    pts.append((bx + rad * math.cos(ang), by + rad * math.sin(ang)))
+                d.polygon(pts, fill=(241, 196, 15, 255))
         else:
             d.ellipse(box, outline=(110, 114, 122, 255), width=3)
             d.text((cx + size / 2 - d.textlength("+", font=f_rank) / 2, 124 + size / 2 - 19), "+", font=f_rank, fill=(110, 114, 122, 255))
-    d.text((500, 192), f"{min(len(joined), total) if joined else card.get('count', 0)}/{total} jugadores",
-           font=f_count, fill=TEXT + (255,))
+    n_in = min(len(joined), total) if joined else card.get("count", 0)
+    count_txt = f"{n_in}/{total} jugadores"
+    d.text((500, 192), count_txt, font=f_count, fill=TEXT + (255,))
+    if not closed and total - n_in == 1:  # a falta de una plaza, lo destacamos
+        f_falta = _load_font(20)
+        d.text((500 + d.textlength(count_txt, font=f_count) + 10, 194), "¡Falta 1!", font=f_falta, fill=GREEN + (255,))
 
     mask = Image.new("L", (W, H), 0)
     ImageDraw.Draw(mask).rounded_rectangle([0, 0, W - 1, H - 1], radius=18, fill=255)
