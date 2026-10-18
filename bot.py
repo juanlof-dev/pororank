@@ -1174,18 +1174,39 @@ class VerifyIconView(View):
         data[self.user_id].append(acc)
         save_data(data)
 
-        await apply_roles(interaction.user, acc["region"], solo, flex)
+        member = resolve_member(interaction)  # desde un MD, interaction.user no es un Member
+        if not member:
+            return await interaction.followup.send(
+                "❌ No te encuentro en el servidor. Entra en él y vuelve a intentarlo.", ephemeral=True
+            )
+        guild = member.guild
+        from_dm = interaction.guild is None
+
+        await apply_roles(member, acc["region"], solo, flex)
         del PENDING_VERIFICATIONS[self.user_id]
+        tracking = get_unlinked_tracking(self.user_id)
         stop_unlinked_tracking(self.user_id)  # ya vinculó, para el cronómetro de recordatorios
+        await log_link_conversion(member, tracking, from_dm)
 
         await interaction.followup.send("✅ **Cuenta vinculada correctamente**",
-                                        embed=apply_footer(build_account_embed(acc, summoner), interaction.guild),
+                                        embed=apply_footer(build_account_embed(acc, summoner), guild),
                                         ephemeral=True)
+        if from_dm:
+            # Desde el MD no hay "siguiente clic" natural: le llevamos a Buscar partida.
+            go_view = View()
+            go_view.add_item(discord.ui.Button(
+                label="Ir a Buscar partida", emoji="🔎", style=discord.ButtonStyle.link,
+                url=f"https://discord.com/channels/{guild.id}/{SEARCH_PANEL_CHANNEL_ID}"
+            ))
+            await interaction.followup.send(
+                "🎉 ¡Listo! Ya tienes tus roles de rango. Cuando quieras jugar, publica tu búsqueda aquí:",
+                view=go_view
+            )
 
         # Si llegó aquí desde "Buscar partida" (no tenía cuenta y le abrimos
         # el modal de vinculación), le lanzamos la búsqueda automáticamente
         # para ahorrarle el segundo clic.
-        if self.user_id in SEARCH_INTENT:
+        if self.user_id in SEARCH_INTENT and interaction.guild is not None:
             mode_key = SEARCH_INTENT.pop(self.user_id)
             await perform_search(interaction, mode_key, acc)
 
@@ -1612,6 +1633,45 @@ def render_panel_banner(emblems):
     im.save(buf, format="PNG")
     return buf.getvalue()
 
+PANEL_BANNER_PNG = None  # el banner no cambia: se dibuja una vez y se reutiliza
+
+async def get_panel_banner_file(filename="panel.png"):
+    """discord.File con el banner de la escalera de rangos (panel y MDs de
+    bienvenida). None si no se pudo dibujar: quien lo use debe publicar igual sin imagen."""
+    global PANEL_BANNER_PNG
+    try:
+        if PANEL_BANNER_PNG is None:
+            urls = {t: tier_emblem_url(t) for t in PANEL_LADDER}
+            raws = await asyncio.gather(*[fetch_asset(u) for u in urls.values()])
+            PANEL_BANNER_PNG = await asyncio.to_thread(render_panel_banner, dict(zip(urls.keys(), raws)))
+        return discord.File(io.BytesIO(PANEL_BANNER_PNG), filename=filename)
+    except Exception as e:
+        print(f"[PANEL] No se pudo dibujar el banner: {type(e).__name__}: {e}")
+        return None
+
+class LinkDMView(View):
+    """Botón de los MDs de bienvenida/recordatorio: abre el formulario de
+    vinculación directamente desde el MD. Es persistente (custom_id fijo)
+    para que los botones de MDs antiguos sigan funcionando tras reiniciar."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Vincular mi cuenta", emoji="🔗", style=discord.ButtonStyle.primary, custom_id="dm_link")
+    async def link(self, interaction: discord.Interaction, _):
+        await interaction.response.send_modal(LinkModal())
+
+def resolve_member(interaction: discord.Interaction):
+    """El Member del servidor de quien lanza la interacción. En el servidor
+    es interaction.user; desde un MD interaction.user es un User sin roles,
+    así que lo buscamos en los servidores que compartimos con él."""
+    if isinstance(interaction.user, discord.Member):
+        return interaction.user
+    for guild in bot.guilds:
+        m = guild.get_member(interaction.user.id)
+        if m:
+            return m
+    return None
+
 async def deploy_panel():
     channel = bot.get_channel(PANEL_CHANNEL_ID)
     if not channel:
@@ -1642,15 +1702,9 @@ async def deploy_panel():
 
     # Banner con la escalera de rangos. Si algo falla al dibujarlo, el panel
     # se publica igualmente, solo con el texto.
-    file = None
-    try:
-        urls = {t: tier_emblem_url(t) for t in PANEL_LADDER}
-        raws = await asyncio.gather(*[fetch_asset(u) for u in urls.values()])
-        png = await asyncio.to_thread(render_panel_banner, dict(zip(urls.keys(), raws)))
-        file = discord.File(io.BytesIO(png), filename="panel.png")
+    file = await get_panel_banner_file("panel.png")
+    if file:
         embed.set_image(url="attachment://panel.png")
-    except Exception as e:
-        print(f"[PANEL] No se pudo dibujar el banner del panel: {type(e).__name__}: {e}")
 
     if file:
         await channel.send(embed=embed, file=file, view=Panel())
@@ -1689,7 +1743,7 @@ async def on_member_join(member: discord.Member):
     contra Riot ni se toca a nadie más: solo actúa sobre quien acaba de entrar.
 
     Si nunca ha vinculado nada, arrancamos el cronómetro de recordatorios de
-    vinculación (24h/72h) usando su fecha real de entrada."""
+    vinculación (MD de bienvenida al entrar + un recordatorio a las 24 h)."""
     data = load_data()
     accounts = data.get(str(member.id))
     primary = next((a for a in accounts if a["primary"]), None) if accounts else None
@@ -1701,6 +1755,12 @@ async def on_member_join(member: discord.Member):
 
     if not has_linked_before(str(member.id)):
         start_unlinked_tracking(str(member.id), member.joined_at.isoformat())
+        # MD de bienvenida inmediato: el mejor momento para animarle a vincular
+        # es justo al entrar, no a las 24 h.
+        if not member.bot:
+            await send_unlinked_reminder(
+                member, member.guild, "welcome", timedelta(0), bot.get_channel(REMINDER_LOG_CHANNEL_ID)
+            )
 
 @bot.event
 async def on_member_remove(member: discord.Member):
@@ -2943,52 +3003,48 @@ async def ultimos_error(interaction: discord.Interaction, error: app_commands.Ap
 
 async def send_unlinked_reminder(member: discord.Member, guild: discord.Guild, stage: str,
                                   elapsed: timedelta, log_channel):
-    """Manda el MD de recordatorio (24h o 72h) y registra el resultado en el
-    canal de log. stage: '24h' o '72h'."""
-    hours = int(elapsed.total_seconds() // 3600)
-    minutes = int((elapsed.total_seconds() % 3600) // 60)
-    tiempo_str = f"{hours}h {minutes}min"
-
-    jump_url = f"https://discord.com/channels/{guild.id}/{PANEL_CHANNEL_ID}"
-    link_view = View()
-    link_view.add_item(discord.ui.Button(
-        label="Ir a vincular mi cuenta", emoji="🔗",
-        style=discord.ButtonStyle.link, url=jump_url
-    ))
-
-    if stage == "24h":
+    """Manda un MD de vinculación y registra el resultado en el canal de
+    log. stage: 'welcome' (al entrar) o '24h' (único recordatorio). Los MDs
+    llevan un botón que abre el formulario de vinculación directamente."""
+    if stage == "welcome":
         embed = discord.Embed(
-            title=f"🔗 Te falta un paso para completar tu entrada en {guild.name}",
+            title=f"¡Bienvenido a {guild.name}! 🎮",
             description=(
-                "Hemos visto que todavía no has vinculado tu cuenta de League of Legends.\n\n"
-                "Vincularla te da tus roles de rango y te permite usar **Buscar partida** "
-                "para encontrar gente con la que jugar ahora mismo.\n\n"
-                "📍 Puedes hacerlo en cualquier momento desde el canal de vinculación del servidor.\n\n"
-                "*Mensaje automático · se envía una sola vez*"
+                "Aquí encuentras **gente de tu nivel para jugar**: Buscar partida, hilo privado y "
+                "sala de voz por grupo, y el perfil de cualquier jugador con `/info`.\n\n"
+                "Para activarlo solo tienes que **vincular tu cuenta de LoL**: **1 minuto**, "
+                "sin contraseñas.\n\n"
+                "*Mensaje automático. Si no la vinculas, te escribiremos una sola vez más.*"
             ),
-            color=COLOR_VERIFICATION
+            color=COLOR_PANEL
         )
     else:
         embed = discord.Embed(
-            title="🔗 ¿Sigues buscando gente con la que jugar?",
+            title="¿Te quedaste a medias? 🔗",
             description=(
-                f"Todavía tienes pendiente vincular tu cuenta en **{guild.name}**.\n\n"
-                "En cuanto la vincules, desbloqueas tus roles de rango y **Buscar partida** "
-                "para encontrar grupo al instante.\n\n"
-                "📍 Te esperamos en el canal de vinculación.\n\n"
-                "*Último recordatorio automático · no recibirás más MD sobre esto*"
+                f"Entraste en **{guild.name}** y todavía no has vinculado tu cuenta, así que aún no "
+                "puedes usar **Buscar partida**: el aviso que llega a jugadores de tu nivel, con hilo "
+                "privado y sala de voz para organizar el grupo.\n\n"
+                "Vincularla lleva **1 minuto** y no pedimos contraseña: solo tu Riot ID y cambiar "
+                "tu icono de invocador.\n\n"
+                "*Último mensaje automático: no recibirás más MD sobre esto.*"
             ),
-            color=0xE74C3C
+            color=COLOR_PANEL
         )
     apply_footer(embed, guild)
 
-    if guild.icon:
+    banner = await get_panel_banner_file("bienvenida.png")
+    send_kwargs = {"embed": embed, "view": LinkDMView()}
+    if banner:
+        embed.set_image(url="attachment://bienvenida.png")
+        send_kwargs["file"] = banner
+    elif guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
     dm_ok = True
     fail_reason = ""
     try:
-        await member.send(embed=embed, view=link_view)
+        await member.send(**send_kwargs)
     except discord.Forbidden:
         dm_ok = False
         fail_reason = "tiene los MDs cerrados"
@@ -3000,16 +3056,20 @@ async def send_unlinked_reminder(member: discord.Member, guild: discord.Guild, s
         return
 
     estado = "✅ MD enviado correctamente" if dm_ok else f"❌ MD no entregado — {fail_reason}"
-    if stage == "24h":
-        emoji_titulo, etiqueta, color_log = "⚠️", "Recordatorio de vinculación enviado (24h)", 0xF1C40F
+    if stage == "welcome":
+        emoji_titulo, etiqueta, color_log = "👋", "MD de bienvenida enviado", COLOR_PANEL
+        tiempo_line = ""
     else:
-        emoji_titulo, etiqueta, color_log = "🔴", "Segundo recordatorio enviado (72h)", 0xE74C3C
+        hours = int(elapsed.total_seconds() // 3600)
+        minutes = int((elapsed.total_seconds() % 3600) // 60)
+        emoji_titulo, etiqueta, color_log = "⚠️", "Recordatorio de vinculación enviado (24h)", COLOR_VERIFICATION
+        tiempo_line = f"🕐 Lleva **{hours}h {minutes}min** sin vincular\n"
 
     log_embed = discord.Embed(
         title=f"{emoji_titulo} {etiqueta}",
         description=(
             f"👤 {member.mention}\n"
-            f"🕐 Lleva **{tiempo_str}** sin vincular\n"
+            f"{tiempo_line}"
             f"🔗 {estado}\n"
             f"📅 Entrada: {member.joined_at.strftime('%d/%m/%Y %H:%M')}"
         ),
@@ -3021,24 +3081,48 @@ async def send_unlinked_reminder(member: discord.Member, guild: discord.Guild, s
     except discord.Forbidden:
         print("[RECORDATORIO] Sin permisos para escribir en el canal de log")
 
+async def log_link_conversion(member: discord.Member, tracking, from_dm: bool):
+    """Anota en el canal de log cuándo vinculó alguien que estaba en
+    seguimiento y desde dónde (MD o servidor), para saber qué funciona."""
+    if not tracking:
+        return  # no estaba en seguimiento (p.ej. ya había vinculado antes)
+    log_channel = bot.get_channel(REMINDER_LOG_CHANNEL_ID)
+    if not log_channel:
+        return
+    try:
+        since = datetime.fromisoformat(tracking["unlinked_since"])
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        elapsed = discord.utils.utcnow() - since
+        hours, minutes = int(elapsed.total_seconds() // 3600), int((elapsed.total_seconds() % 3600) // 60)
+        tardo = f"{hours}h {minutes}min"
+    except (ValueError, TypeError):
+        tardo = "?"
+    origen = "desde el **botón del MD**" if from_dm else "desde el **servidor**"
+    despues = " (tras el recordatorio de 24h)" if tracking.get("reminder_24h_sent") else ""
+    embed = discord.Embed(
+        title="✅ Cuenta vinculada",
+        description=f"👤 {member.mention}\n🕐 Tardó **{tardo}** en vincular\n🔗 Vinculó {origen}{despues}",
+        color=COLOR_GROUP_OPEN
+    )
+    apply_footer(embed, member.guild)
+    try:
+        await log_channel.send(embed=embed)
+    except discord.HTTPException:
+        pass
+
 async def process_unlinked_member(member: discord.Member, guild: discord.Guild, record: dict,
                                    now: datetime, log_channel):
+    """Único recordatorio automático: a las 24 h de entrar. (El mensaje de
+    bienvenida se manda al entrar, en on_member_join; el antiguo recordatorio
+    de 72 h se eliminó.)"""
     since = datetime.fromisoformat(record["unlinked_since"])
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
     elapsed = now - since
     uid = str(member.id)
 
-    if elapsed >= timedelta(hours=72) and not record["reminder_72h_sent"]:
-        if not record["reminder_24h_sent"]:
-            # Se pasó de las 24h sin que lo pilláramos (p.ej. bot caído):
-            # no mandamos ya el de 24h caducado, solo lo damos por hecho
-            # y mandamos directamente el de 72h.
-            mark_reminder_sent(uid, "24h")
-        await send_unlinked_reminder(member, guild, "72h", elapsed, log_channel)
-        mark_reminder_sent(uid, "72h")
-
-    elif elapsed >= timedelta(hours=24) and not record["reminder_24h_sent"]:
+    if elapsed >= timedelta(hours=24) and not record["reminder_24h_sent"]:
         await send_unlinked_reminder(member, guild, "24h", elapsed, log_channel)
         mark_reminder_sent(uid, "24h")
 
@@ -3096,6 +3180,7 @@ async def on_ready():
     # reinicio reenganche interacciones reales a una instancia con datos falsos.
     bot.add_view(Panel())
     bot.add_view(SearchPanel())
+    bot.add_view(LinkDMView())
 
     # ---------- REGISTRO DE COMANDOS SLASH ----------
     # Copiamos los comandos globales a cada guild para que estén disponibles al instante.
