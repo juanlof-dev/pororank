@@ -78,6 +78,12 @@ FLEX_ROLES = {
 }
 
 # 📌 Canales de "Buscar partida" — uno por tier de SoloQ
+# 🔎 Canal único donde se publican TODOS los avisos de DuoQ (la tarjeta del aviso ya
+# indica el rango, y las menciones van solo a los roles de la ventana de rangos).
+DUOQ_CHANNEL_ID = 1561334404695986176
+
+# (Legado) Canales por rango. Ya no se usan para publicar avisos; se conservan por si se
+# quieren volver a usar para otra cosa.
 TIER_CHANNELS = {
     "UNRANKED": 1547299799550656592,     # #sin-clasificar
     "IRON": 1547299871361470484,          # #hierro
@@ -196,7 +202,7 @@ VOICE_CHANNEL_REFERENCE_ID = 1547249351456456706
 
 # 📌 Modalidades de juego para "Buscar partida". DUOQ es un caso especial:
 # usa el sistema de 11 canales por tier de SoloQ que ya existe
-# (TIER_CHANNELS/TIER_SEARCH_WINDOWS), así que no lleva channel_id aquí.
+# (DUOQ_CHANNEL_ID + TIER_SEARCH_WINDOWS para las menciones).
 # El resto tiene un único canal fijo cada una.
 #
 # rank_source: "solo" (SoloQ real, solo DuoQ), "flex" (FlexQ real),
@@ -205,7 +211,7 @@ VOICE_CHANNEL_REFERENCE_ID = 1547249351456456706
 GAME_MODES = {
     "DUOQ": {
         "label": "DuoQ (SoloQ)",
-        "channel_id": None,  # usa TIER_CHANNELS, no un canal fijo
+        "channel_id": DUOQ_CHANNEL_ID,  # un único canal para todos los DuoQ (ya no uno por rango)
         "max_members": 2,
         "rank_source": "solo",
         "show_lane": True,
