@@ -942,7 +942,7 @@ async def send_error(interaction: discord.Interaction, detail: str):
 
 async def perform_search(interaction: discord.Interaction, mode_key: str, primary: dict):
     """Lógica de 'Buscar partida' para cualquier modalidad. DUOQ usa el
-    sistema de 11 canales por tier de SoloQ (con ventana de tiers cercanos,
+    canal único (con ventana de tiers cercanos,
     mencionando a los roles de esa ventana); el resto de modos usa un único
     canal fijo, sin ventana ni menciones de rol. Asume que la interacción ya
     se difirió (interaction.response.defer) y usa followups para responder.
@@ -981,10 +981,9 @@ async def perform_search(interaction: discord.Interaction, mode_key: str, primar
     role_mentions = []
 
     if mode_key == "DUOQ":
-        channel_id = TIER_CHANNELS.get(solo_tier)
-        channel = interaction.guild.get_channel(channel_id) if channel_id else None
+        channel = interaction.guild.get_channel(DUOQ_CHANNEL_ID)
         if not channel:
-            return await send_error(interaction, "No se ha encontrado tu canal de rango.")
+            return await send_error(interaction, "El canal de DuoQ todavía no está configurado.")
 
         # Mencionamos a los roles de toda la ventana (propio + vecinos), no
         # solo al del canal, para que también se enteren los de tiers cercanos.
@@ -1416,7 +1415,7 @@ class Panel(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Vincular cuenta", style=discord.ButtonStyle.primary, custom_id="panel_link")
+    @discord.ui.button(label="Vincular mi cuenta", emoji="🔗", style=discord.ButtonStyle.primary, custom_id="panel_link")
     async def link(self, interaction, _):
         await interaction.response.send_modal(LinkModal())
 
@@ -1566,6 +1565,53 @@ async def update_ranks_loop():
 
 # ------------------ FUNCION DEPLOY PANEL ------------------
 
+PANEL_LADDER = ["IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "EMERALD", "DIAMOND", "MASTER", "GRANDMASTER", "CHALLENGER"]
+
+def render_panel_banner(emblems):
+    """Banner del panel de vinculación: titular + escalera de rangos de
+    Hierro a Aspirante (emblemas reales si se pudieron descargar; si no,
+    círculos del color de cada rango) y los modos de juego."""
+    W, H = 760, 280
+    BG = (30, 31, 34)
+    im = Image.new("RGBA", (W, H), BG + (255,))
+    shade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shade)
+    for x in range(W):
+        sd.line([(x, 0), (x, H)], fill=(120, 70, 170, int(120 * (1 - x / W))))
+    im.alpha_composite(shade)
+    d = ImageDraw.Draw(im)
+    d.text((36, 26), "Encuentra gente", font=_load_font(46), fill=(255, 255, 255, 255))
+    d.text((36, 80), "de tu nivel.", font=_load_font(46), fill=(190, 140, 235, 255))
+    d.text((38, 140), "Vincula tu cuenta en 1 minuto.", font=_load_font(22), fill=(210, 212, 220, 255))
+    f_chip = _load_font(14)
+    for k, t in enumerate(("SOLOQ · FLEXQ", "DUOQ · ARAM", "ARENA · CLASH")):
+        d.text((W - 36 - d.textlength(t, font=f_chip), 36 + k * 22), t, font=f_chip, fill=(160, 165, 175, 255))
+
+    x = 36
+    for i, tier in enumerate(PANEL_LADDER):
+        size = 40 + i * 5
+        y = H - 22 - size
+        raw = emblems.get(tier) if emblems else None
+        done = False
+        if raw:
+            try:
+                e = Image.open(io.BytesIO(raw)).convert("RGBA").resize((size, size), Image.LANCZOS)
+                im.alpha_composite(e, (x, y))
+                done = True
+            except Exception:
+                done = False
+        if not done:
+            col = TIER_COLORS.get(tier, TIER_COLORS["UNRANKED"])
+            d.ellipse([x, y, x + size, y + size], fill=col + (255,), outline=(255, 255, 255, 90), width=2)
+        x += size + 6
+
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, W - 1, H - 1], radius=14, fill=255)
+    im.putalpha(mask)
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
 async def deploy_panel():
     channel = bot.get_channel(PANEL_CHANNEL_ID)
     if not channel:
@@ -1573,22 +1619,43 @@ async def deploy_panel():
         return
     await channel.purge(limit=5)
     embed = discord.Embed(
-        title="🎮 Tu cuenta de League of Legends, conectada con la comunidad.",
+        title="🎮 Encuentra gente de tu nivel para jugar",
         description=(
-            "Vincula tu cuenta para obtener automáticamente tus rangos de SoloQ y FlexQ.\n\n"
-            "**¿Qué puedes hacer?**\n"
-            "🔗 Vincular tu cuenta\n"
-            "👤 Gestionar tus cuentas\n"
-            "🔄 Mantener tus rangos actualizados\n\n"
+            "Vincula tu cuenta de LoL en **1 minuto** y entra en la comunidad que te empareja "
+            "con jugadores de tu rango.\n\n"
+            "**Qué desbloqueas**\n"
+            "🏆 **Tus roles de rango** de SoloQ y FlexQ, siempre al día\n"
+            "🔎 **Buscar partida**: avisamos a jugadores de tu nivel\n"
+            "💬 **Hilo privado y sala de voz** para cada grupo, sin pedir el Discord de nadie\n"
+            "📊 **Perfil de cualquier jugador** con `/info`: rangos, winrate y campeones\n"
+            "🎉 **Subidas de rango** celebradas en el servidor\n\n"
+            "**Cómo funciona**\n"
+            "1️⃣ Pulsa **Vincular mi cuenta** · 2️⃣ Cambia tu icono de invocador · 3️⃣ ¡Listo!\n"
+            "🔒 Nunca te pedimos contraseña.\n\n"
             "───────────────\n\n"
-            "🔎 **¿Buscas gente para jugar?**\n"
-            f"Dirígete a <#{SEARCH_PANEL_CHANNEL_ID}> para publicar tu búsqueda."
+            "🔎 **¿Ya estás vinculado?** Publica tu búsqueda en "
+            f"<#{SEARCH_PANEL_CHANNEL_ID}>."
         ),
         color=COLOR_PANEL
     )
-    embed.set_thumbnail(url="https://upload.wikimedia.org/wikipedia/en/7/77/League_of_Legends_Logo.png")
     apply_footer(embed, channel.guild)
-    await channel.send(embed=embed, view=Panel())
+
+    # Banner con la escalera de rangos. Si algo falla al dibujarlo, el panel
+    # se publica igualmente, solo con el texto.
+    file = None
+    try:
+        urls = {t: tier_emblem_url(t) for t in PANEL_LADDER}
+        raws = await asyncio.gather(*[fetch_asset(u) for u in urls.values()])
+        png = await asyncio.to_thread(render_panel_banner, dict(zip(urls.keys(), raws)))
+        file = discord.File(io.BytesIO(png), filename="panel.png")
+        embed.set_image(url="attachment://panel.png")
+    except Exception as e:
+        print(f"[PANEL] No se pudo dibujar el banner del panel: {type(e).__name__}: {e}")
+
+    if file:
+        await channel.send(embed=embed, file=file, view=Panel())
+    else:
+        await channel.send(embed=embed, view=Panel())
 
 async def deploy_search_panel():
     channel = bot.get_channel(SEARCH_PANEL_CHANNEL_ID)
@@ -2906,7 +2973,7 @@ async def send_unlinked_reminder(member: discord.Member, guild: discord.Guild, s
             title="🔗 ¿Sigues buscando gente con la que jugar?",
             description=(
                 f"Todavía tienes pendiente vincular tu cuenta en **{guild.name}**.\n\n"
-                "En cuanto la vincules, desbloqueas tus canales de rango y **Buscar partida** "
+                "En cuanto la vincules, desbloqueas tus roles de rango y **Buscar partida** "
                 "para encontrar grupo al instante.\n\n"
                 "📍 Te esperamos en el canal de vinculación.\n\n"
                 "*Último recordatorio automático · no recibirás más MD sobre esto*"
